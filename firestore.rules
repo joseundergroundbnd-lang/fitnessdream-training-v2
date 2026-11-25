@@ -1,0 +1,406 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default-Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ---------------------------------------------------------
+    // Global Hardened Primitives (Eight Pillars)
+    // ---------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email == 'joseundergroundbnd@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin()
+        || (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // ---------------------------------------------------------
+    // Validation Blueprints (Anti-Update-Gap)
+    // ---------------------------------------------------------
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['uid', 'name', 'role', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'name', 'role', 'createdAt'])
+        && isValidId(data.uid)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.role in ['owner', 'coach', 'scanner']
+        && data.createdAt is timestamp;
+    }
+
+    function isValidGymMember(data) {
+      return data.keys().hasAll([
+          'uid',
+          'memberCode',
+          'name',
+          'tier',
+          'goal',
+          'feeStatus',
+          'monthlyFee',
+          'streakDays',
+          'totalCheckIns',
+          'lastCheckInLabel',
+          'daysSinceLastVisit',
+          'outreachStatus',
+          'assignedCoach',
+          'isRealMember',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'memberCode',
+          'name',
+          'tier',
+          'goal',
+          'feeStatus',
+          'monthlyFee',
+          'streakDays',
+          'totalCheckIns',
+          'lastCheckInLabel',
+          'daysSinceLastVisit',
+          'outreachStatus',
+          'lastOutreachNote',
+          'assignedCoach',
+          'isRealMember',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.memberCode is string && data.memberCode.size() >= 3 && data.memberCode.size() <= 32
+        && data.memberCode.matches('^[A-Z0-9\\-]+$')
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.tier in ['Socio Fundador', 'Socio Club']
+        && data.goal is string && data.goal.size() >= 1 && data.goal.size() <= 120
+        && data.feeStatus in ['al-dia', 'pendiente']
+        && data.monthlyFee is number && data.monthlyFee >= 0 && data.monthlyFee <= 500
+        && data.streakDays is number && data.streakDays >= 0 && data.streakDays <= 10000
+        && data.totalCheckIns is number && data.totalCheckIns >= 0 && data.totalCheckIns <= 100000
+        && data.lastCheckInLabel is string && data.lastCheckInLabel.size() <= 64
+        && data.daysSinceLastVisit is number && data.daysSinceLastVisit >= 0 && data.daysSinceLastVisit <= 3650
+        && data.outreachStatus in ['pendiente', 'contactado', 'reactivado']
+        && (!('lastOutreachNote' in data) || (data.lastOutreachNote is string && data.lastOutreachNote.size() <= 500))
+        && data.assignedCoach is string && data.assignedCoach.size() >= 1 && data.assignedCoach.size() <= 60
+        && data.isRealMember is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMemberPrivateContact(data) {
+      return data.keys().hasAll(['uid', 'email', 'phone', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'phone', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() <= 160
+        && data.phone is string && data.phone.size() <= 32
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAccessLog(data) {
+      return data.keys().hasAll([
+          'memberId',
+          'memberUid',
+          'memberName',
+          'memberCode',
+          'feeStatus',
+          'allowed',
+          'reason',
+          'scannerLabel',
+          'scannedByUid',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'memberId',
+          'memberUid',
+          'memberName',
+          'memberCode',
+          'feeStatus',
+          'allowed',
+          'reason',
+          'scannerLabel',
+          'scannedByUid',
+          'createdAt'
+        ])
+        && isValidId(data.memberId)
+        && isValidId(data.memberUid)
+        && data.memberName is string && data.memberName.size() >= 1 && data.memberName.size() <= 100
+        && data.memberCode is string && data.memberCode.size() >= 3 && data.memberCode.size() <= 32
+        && data.feeStatus in ['al-dia', 'pendiente']
+        && data.allowed is bool
+        && data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 200
+        && data.scannerLabel is string && data.scannerLabel.size() >= 1 && data.scannerLabel.size() <= 80
+        && isValidId(data.scannedByUid)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLiveCoachRoutine(data) {
+      return data.keys().hasAll([
+          'targetMemberId',
+          'title',
+          'frequency',
+          'dayLabel',
+          'coachId',
+          'coachName',
+          'coachRole',
+          'goal',
+          'coachMessage',
+          'machineCodes',
+          'createdByUid',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'targetMemberId',
+          'title',
+          'frequency',
+          'dayLabel',
+          'coachId',
+          'coachName',
+          'coachRole',
+          'goal',
+          'coachMessage',
+          'machineCodes',
+          'createdByUid',
+          'createdAt'
+        ])
+        && isValidId(data.targetMemberId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && data.frequency in ['Diaria', 'Semanal']
+        && data.dayLabel is string && data.dayLabel.size() >= 1 && data.dayLabel.size() <= 80
+        && isValidId(data.coachId)
+        && data.coachName is string && data.coachName.size() >= 1 && data.coachName.size() <= 80
+        && data.coachRole is string && data.coachRole.size() >= 1 && data.coachRole.size() <= 100
+        && data.goal is string && data.goal.size() >= 1 && data.goal.size() <= 120
+        && data.coachMessage is string && data.coachMessage.size() >= 1 && data.coachMessage.size() <= 600
+        && data.machineCodes is list && data.machineCodes.size() >= 1 && data.machineCodes.size() <= 15
+        && data.machineCodes[0] is string && data.machineCodes[0].size() <= 32
+        && isValidId(data.createdByUid)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLiveDirectMessage(data) {
+      return data.keys().hasAll([
+          'coachId',
+          'memberId',
+          'senderRole',
+          'senderName',
+          'kind',
+          'authorUid',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'coachId',
+          'memberId',
+          'senderRole',
+          'senderName',
+          'kind',
+          'text',
+          'audioDataUrl',
+          'audioDurationSec',
+          'authorUid',
+          'createdAt'
+        ])
+        && isValidId(data.coachId)
+        && isValidId(data.memberId)
+        && data.senderRole in ['socio', 'coach']
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 100
+        && data.kind in ['text', 'audio']
+        && (!('text' in data) || (data.text is string && data.text.size() <= 1000))
+        && (!('audioDataUrl' in data) || (data.audioDataUrl is string && data.audioDataUrl.size() <= 350000))
+        && (!('audioDurationSec' in data) || (data.audioDurationSec is number && data.audioDurationSec >= 0 && data.audioDurationSec <= 120))
+        && isValidId(data.authorUid)
+        && data.createdAt is timestamp;
+    }
+
+    // ---------------------------------------------------------
+    // 1. Authorized Staff & Scanner Operators (/admins/{adminUid})
+    // ---------------------------------------------------------
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid) && (isOwner(adminUid) || isAdmin());
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(adminUid)
+        && isValidAdminUser(incoming())
+        && incoming().uid == adminUid
+        && incoming().createdAt == request.time
+        && isAdmin();
+      allow update: if isValidId(adminUid)
+        && isValidAdminUser(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role'])
+        && isAdmin();
+      allow delete: if isValidId(adminUid) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 2. Real Gym Members (/members/{memberId}) + PII Split
+    // ---------------------------------------------------------
+    match /members/{memberId} {
+      allow get: if isValidId(memberId) && (isOwner(memberId) || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+
+      allow create: if isValidId(memberId)
+        && isVerified()
+        && isValidGymMember(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() || (
+            memberId == request.auth.uid
+            && incoming().uid == request.auth.uid
+            && incoming().feeStatus == 'al-dia'
+            && incoming().outreachStatus == 'pendiente'
+            && incoming().isRealMember == true
+          )
+        );
+
+      allow update: if isValidId(memberId)
+        && isVerified()
+        && isValidGymMember(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Tier 1: Reception PC / Coaches / Scanner can manage fee status, check-ins, retention
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name',
+            'tier',
+            'goal',
+            'feeStatus',
+            'monthlyFee',
+            'streakDays',
+            'totalCheckIns',
+            'lastCheckInLabel',
+            'daysSinceLastVisit',
+            'outreachStatus',
+            'lastOutreachNote',
+            'assignedCoach',
+            'updatedAt'
+          ]))
+          ||
+          // Tier 2: Member can ONLY edit their own profile fields (cannot self-modify feeStatus!)
+          (isOwner(memberId) && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name',
+            'goal',
+            'tier',
+            'updatedAt'
+          ]))
+        );
+
+      allow delete: if isValidId(memberId) && isAdmin();
+
+      // PII-Isolated Private Contact Subcollection (Master Gate via parent exists())
+      match /private/{docId} {
+        allow get: if isValidId(memberId) && isValidId(docId) && (isOwner(memberId) || isAdmin());
+        allow list: if false;
+        allow create: if isValidId(memberId)
+          && isValidId(docId)
+          && docId == 'contact'
+          && isVerified()
+          && isValidMemberPrivateContact(incoming())
+          && incoming().updatedAt == request.time
+          && existsAfter(/databases/$(database)/documents/members/$(memberId))
+          && (isAdmin() || (isOwner(memberId) && incoming().uid == request.auth.uid));
+        allow update: if isValidId(memberId)
+          && isValidId(docId)
+          && docId == 'contact'
+          && isVerified()
+          && isValidMemberPrivateContact(incoming())
+          && incoming().uid == existing().uid
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phone', 'updatedAt'])
+          && exists(/databases/$(database)/documents/members/$(memberId))
+          && (isAdmin() || isOwner(memberId));
+        allow delete: if isValidId(memberId) && isValidId(docId) && isAdmin();
+      }
+    }
+
+    // ---------------------------------------------------------
+    // 3. Live Turnstile QR Access Logs (/accessLogs/{logId})
+    // ---------------------------------------------------------
+    match /accessLogs/{logId} {
+      allow get: if isValidId(logId) && (isAdmin() || (isSignedIn() && existing().memberUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().memberUid == request.auth.uid);
+      allow create: if isValidId(logId)
+        && isVerified()
+        && isValidAccessLog(incoming())
+        && incoming().scannedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/members/$(incoming().memberId))
+        && isAdmin();
+      allow update, delete: if false;
+    }
+
+    // ---------------------------------------------------------
+    // 4. Live Coach Routines (/coachRoutines/{routineId})
+    // ---------------------------------------------------------
+    match /coachRoutines/{routineId} {
+      allow get: if isValidId(routineId) && (
+        isAdmin() || (isSignedIn() && (existing().targetMemberId == 'all' || existing().targetMemberId == request.auth.uid))
+      );
+      allow list: if isBootstrappedAdmin() || (
+        isSignedIn() && (existing().targetMemberId == 'all' || existing().targetMemberId == request.auth.uid)
+      );
+      allow create: if isValidId(routineId)
+        && isVerified()
+        && isValidLiveCoachRoutine(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && isAdmin();
+      allow update: if isValidId(routineId)
+        && isVerified()
+        && isValidLiveCoachRoutine(incoming())
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'dayLabel', 'goal', 'coachMessage', 'machineCodes'])
+        && isAdmin();
+      allow delete: if isValidId(routineId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 5. Live Direct Messages (/directMessages/{messageId})
+    // ---------------------------------------------------------
+    match /directMessages/{messageId} {
+      allow get: if isValidId(messageId) && (isAdmin() || (isSignedIn() && existing().memberId == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().memberId == request.auth.uid);
+      allow create: if isValidId(messageId)
+        && isVerified()
+        && isValidLiveDirectMessage(incoming())
+        && incoming().authorUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && (
+          isAdmin() || (
+            incoming().memberId == request.auth.uid
+            && incoming().senderRole == 'socio'
+          )
+        );
+      allow update, delete: if false;
+    }
+  }
+}

@@ -1,0 +1,388 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized gym owner, coach, or turnstile scanner device operator.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "role": {
+          "type": "string",
+          "enum": ["owner", "coach", "scanner"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "name", "role", "createdAt"]
+    },
+    "GymMember": {
+      "title": "GymMember",
+      "description": "Operational gym member profile synced across member phone, reception PC, and turnstile QR scanner (no PII email/phone).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberCode": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["Socio Fundador", "Socio Club"]
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "feeStatus": {
+          "type": "string",
+          "enum": ["al-dia", "pendiente"]
+        },
+        "monthlyFee": {
+          "type": "number"
+        },
+        "streakDays": {
+          "type": "number"
+        },
+        "totalCheckIns": {
+          "type": "number"
+        },
+        "lastCheckInLabel": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "daysSinceLastVisit": {
+          "type": "number"
+        },
+        "outreachStatus": {
+          "type": "string",
+          "enum": ["pendiente", "contactado", "reactivado"]
+        },
+        "lastOutreachNote": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "assignedCoach": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "isRealMember": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "memberCode",
+        "name",
+        "tier",
+        "goal",
+        "feeStatus",
+        "monthlyFee",
+        "streakDays",
+        "totalCheckIns",
+        "lastCheckInLabel",
+        "daysSinceLastVisit",
+        "outreachStatus",
+        "assignedCoach",
+        "isRealMember",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MemberPrivateContact": {
+      "title": "MemberPrivateContact",
+      "description": "Isolated PII contact details (email and phone) accessible only to the member owner or gym admins.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "phone", "updatedAt"]
+    },
+    "AccessLog": {
+      "title": "AccessLog",
+      "description": "Immutable turnstile QR scan audit entry created by an authorized scanner or reception PC.",
+      "type": "object",
+      "properties": {
+        "memberId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "memberCode": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 32
+        },
+        "feeStatus": {
+          "type": "string",
+          "enum": ["al-dia", "pendiente"]
+        },
+        "allowed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "scannerLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "scannedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "memberId",
+        "memberUid",
+        "memberName",
+        "memberCode",
+        "feeStatus",
+        "allowed",
+        "reason",
+        "scannerLabel",
+        "scannedByUid",
+        "createdAt"
+      ]
+    },
+    "LiveCoachRoutine": {
+      "title": "LiveCoachRoutine",
+      "description": "Official routine sent by Javi Busta or Joel to all members or a specific member.",
+      "type": "object",
+      "properties": {
+        "targetMemberId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "frequency": {
+          "type": "string",
+          "enum": ["Diaria", "Semanal"]
+        },
+        "dayLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "coachId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "coachName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "coachRole": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "coachMessage": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "machineCodes": {
+          "type": "array"
+        },
+        "createdByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "targetMemberId",
+        "title",
+        "frequency",
+        "dayLabel",
+        "coachId",
+        "coachName",
+        "coachRole",
+        "goal",
+        "coachMessage",
+        "machineCodes",
+        "createdByUid",
+        "createdAt"
+      ]
+    },
+    "LiveDirectMessage": {
+      "title": "LiveDirectMessage",
+      "description": "Real-time text or short voice note between a member and Coach Javi Busta or Joel.",
+      "type": "object",
+      "properties": {
+        "coachId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderRole": {
+          "type": "string",
+          "enum": ["socio", "coach"]
+        },
+        "senderName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["text", "audio"]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "audioDataUrl": {
+          "type": "string",
+          "maxLength": 350000
+        },
+        "audioDurationSec": {
+          "type": "number"
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "coachId",
+        "memberId",
+        "senderRole",
+        "senderName",
+        "kind",
+        "authorUid",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Authorized coaches, receptionists, and scanner operators."
+    },
+    "/members/{memberId}": {
+      "schema": { "$ref": "#/entities/GymMember" },
+      "description": "Operational member records (fee status, memberCode, check-in stats) without PII."
+    },
+    "/members/{memberId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/MemberPrivateContact" },
+      "description": "PII-isolated private contact info (email, phone) readable only by the member owner or admin."
+    },
+    "/accessLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AccessLog" },
+      "description": "Immutable live turnstile QR access logs."
+    },
+    "/coachRoutines/{routineId}": {
+      "schema": { "$ref": "#/entities/LiveCoachRoutine" },
+      "description": "Live routines sent by Javi Busta or Joel to members."
+    },
+    "/directMessages/{messageId}": {
+      "schema": { "$ref": "#/entities/LiveDirectMessage" },
+      "description": "Live messages and short voice notes between members and coaches."
+    }
+  }
+}

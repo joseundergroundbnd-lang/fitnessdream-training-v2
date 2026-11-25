@@ -1,0 +1,12 @@
+{
+  "framework": "vite",
+  "installCommand": "npm install --legacy-peer-deps",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/((?!assets/|src/assets/|dossier/|pwa-.*\\.png|apple-touch-icon\\.png|sw\\.js|registerSW\\.js|workbox-.*\\.js|manifest\\.webmanifest).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

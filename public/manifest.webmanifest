@@ -1,0 +1,32 @@
+{
+  "id": "/",
+  "name": "FitnessDreams Training",
+  "short_name": "Training",
+  "description": "App oficial de FitnessDreams Benidorm: acceso QR inteligente, entrenos Telju, rutinas de coaches, mapa 3D y Fit Café.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#06080D",
+  "theme_color": "#06080D",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Remix FitnessDream",
+  "description": "App oficial del club FitnessDream: entrenamiento con maquinaria Telju, control de acceso QR, hábitos de constancia, mapa interactivo, clases de sala multifunción, Challenge de la Mancuerna y ventajas de Socio Fundador.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
