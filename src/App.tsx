@@ -34,6 +34,7 @@ import { TurnstileScannerView } from './components/TurnstileScannerView';
 import { WorkoutView } from './components/WorkoutView';
 import {
   BOOTSTRAPPED_OWNER_EMAIL,
+  OFFICIAL_GYM_EMAIL,
   auth,
   completeGoogleRedirectSignIn,
   signInWithGoogleAccount,
@@ -685,14 +686,24 @@ export default function App() {
     return [...state.walkInMembers, selfMember, ...seeded];
   }, [localDemoFeeOverrides, state.clubMembers, state.profile, state.walkInMembers]);
 
-  // Unified list of authorized gym & coach Google accounts (Bootstrapped owner + Firestore cloud + local fallback)
+  // Unified list of authorized gym & coach Google accounts (Official Gym + Bootstrapped Owner + Firestore cloud + local fallback)
   const mergedAuthorizedStaff = useMemo<AuthorizedStaffRecord[]>(() => {
     const map = new Map<string, AuthorizedStaffRecord>();
+    const gymMainId = emailToStaffDocId(OFFICIAL_GYM_EMAIL);
     const ownerId = emailToStaffDocId(BOOTSTRAPPED_OWNER_EMAIL);
+    map.set(gymMainId, {
+      staffId: gymMainId,
+      email: OFFICIAL_GYM_EMAIL,
+      label: 'Correo oficial Gimnasio FitnessDreams (acceso permanente)',
+      role: 'gym-main',
+      addedByUid: 'bootstrap',
+      isBootstrappedOwner: true,
+      isCloudSynced: true,
+    });
     map.set(ownerId, {
       staffId: ownerId,
       email: BOOTSTRAPPED_OWNER_EMAIL,
-      label: 'Propietario fundador (respaldo permanente)',
+      label: 'Propietario fundador (acceso permanente)',
       role: 'owner',
       addedByUid: 'bootstrap',
       isBootstrappedOwner: true,
@@ -706,7 +717,7 @@ export default function App() {
     for (const item of liveAuthorizedStaff) {
       map.set(item.staffId, {
         ...item,
-        isBootstrappedOwner: item.staffId === ownerId,
+        isBootstrappedOwner: item.staffId === ownerId || item.staffId === gymMainId,
         isCloudSynced: true,
       });
     }
@@ -714,7 +725,7 @@ export default function App() {
   }, [liveAuthorizedStaff, state.localAuthorizedStaff]);
 
   const primaryGymEmail = useMemo(
-    () => resolvePrimaryGymEmail(mergedAuthorizedStaff, BOOTSTRAPPED_OWNER_EMAIL),
+    () => resolvePrimaryGymEmail(mergedAuthorizedStaff, OFFICIAL_GYM_EMAIL),
     [mergedAuthorizedStaff]
   );
 
@@ -854,13 +865,13 @@ export default function App() {
     });
   };
 
-  const handleSignInGoogle = async () => {
+  const handleSignInGoogle = async (loginHintEmail?: string) => {
     if (isSigningIn) return;
     setIsSigningIn(true);
     setAuthError(null);
     setAuthNotice(null);
     try {
-      const user = await signInWithGoogleAccount();
+      const user = await signInWithGoogleAccount(loginHintEmail);
       if (!user) {
         setAuthNotice({
           tone: 'info',
@@ -900,12 +911,12 @@ export default function App() {
       if (adminFlag) {
         setAuthNotice({
           tone: 'success',
-          message: `Conectado con Google como ${user.email}. Acceso total de Dirección y Coaches ACTIVO en la nube.`,
+          message: `Conectado con Google como ${user.email}. Acceso total de Dirección y Coaches ACTIVO en la nube (compartido entre ${OFFICIAL_GYM_EMAIL} y ${BOOTSTRAPPED_OWNER_EMAIL}).`,
         });
       } else {
         setAuthNotice({
           tone: 'warning',
-          message: `Conectado con Google como ${user.email} (cuenta de socio). Para ver la base de datos completa de coaches/dirección, inicia sesión con ${primaryGymEmail} o autoriza este correo en Dirección → Cuentas Google del Gimnasio.`,
+          message: `Conectado con Google como ${user.email} (cuenta de socio). Para ver la base de datos completa de coaches/dirección, inicia sesión con ${OFFICIAL_GYM_EMAIL} o ${BOOTSTRAPPED_OWNER_EMAIL}.`,
         });
       }
     } catch (err) {
@@ -983,7 +994,8 @@ export default function App() {
 
   const handleRemoveAuthorizedStaff = async (staffId: string): Promise<void> => {
     const ownerId = emailToStaffDocId(BOOTSTRAPPED_OWNER_EMAIL);
-    if (staffId === ownerId) return;
+    const gymMainId = emailToStaffDocId(OFFICIAL_GYM_EMAIL);
+    if (staffId === ownerId || staffId === gymMainId) return;
     if (isLiveAdmin && authUser) {
       await removeAuthorizedStaffEmail(staffId);
     }

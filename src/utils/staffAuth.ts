@@ -1,3 +1,10 @@
+export const OFFICIAL_GYM_EMAIL = 'fitnessdreamsbenidorm@gmail.com';
+export const BOOTSTRAPPED_OWNER_EMAIL = 'joseundergroundbnd@gmail.com';
+export const BOOTSTRAPPED_ADMIN_EMAILS = [
+  OFFICIAL_GYM_EMAIL,
+  BOOTSTRAPPED_OWNER_EMAIL,
+] as const;
+
 export type AuthorizedStaffRole = 'gym-main' | 'owner' | 'coach' | 'scanner';
 
 export interface AuthorizedStaffRecord {
@@ -11,6 +18,12 @@ export interface AuthorizedStaffRecord {
 }
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function isBootstrappedAdminEmail(email: string | null | undefined): boolean {
+  if (!email) return false;
+  const normalized = email.trim().toLowerCase();
+  return BOOTSTRAPPED_ADMIN_EMAILS.some((allowed) => allowed === normalized);
+}
 
 /**
  * Normalizes a Google email into the exact Firestore document ID used by

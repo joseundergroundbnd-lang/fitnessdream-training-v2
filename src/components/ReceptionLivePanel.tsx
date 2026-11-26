@@ -23,7 +23,7 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
-import { BOOTSTRAPPED_OWNER_EMAIL } from '../firebase';
+import { BOOTSTRAPPED_OWNER_EMAIL, OFFICIAL_GYM_EMAIL } from '../firebase';
 import type { CoachProfile, FeeStatus } from '../types/gym';
 import { buildTurnstileScannerUrl, resolveDirectPublicUrl } from '../utils/pwaUtils';
 import { buildMemberQrPayload } from '../utils/qrPass';
@@ -49,7 +49,7 @@ interface ReceptionLivePanelProps {
     role: AuthorizedStaffRole;
   }) => Promise<{ savedToCloud: boolean; record: AuthorizedStaffRecord }>;
   onRemoveAuthorizedStaff: (staffId: string) => Promise<void>;
-  onSignInGoogle: () => Promise<void>;
+  onSignInGoogle: (loginHintEmail?: string) => Promise<void>;
   onSignOutGoogle: () => Promise<void>;
   liveMembers: LiveGymMember[];
   localDemoMembers: LiveGymMember[];
@@ -71,7 +71,7 @@ const PILOT_STEPS = [
   {
     id: 'step-1',
     title: '1. Inicia sesión con Google en el ordenador de recepción',
-    detail: `Usa tu cuenta (${BOOTSTRAPPED_OWNER_EMAIL}) para activar el control real de socios, cuotas y entradas en la nube.`,
+    detail: `Puedes entrar con ${OFFICIAL_GYM_EMAIL} o con ${BOOTSTRAPPED_OWNER_EMAIL}: ambas comparten la misma base de datos real en la nube.`,
   },
   {
     id: 'step-2',
@@ -318,22 +318,24 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
             ) : authUser ? (
               <>
                 Estás conectado como <strong className="text-white">{authUser.email}</strong> (cuenta
-                de socio). Para gestionar el gimnasio o ver los socios reales en Javi, cambia a{' '}
-                <span className="font-mono text-[#33C1FF]">{primaryGymEmail}</span> o añade tu correo
-                abajo en «Cuenta Google del Gimnasio».
+                de socio). Cambia a{' '}
+                <span className="font-mono text-[#33C1FF]">{OFFICIAL_GYM_EMAIL}</span> o{' '}
+                <span className="font-mono text-[#33C1FF]">{BOOTSTRAPPED_OWNER_EMAIL}</span>{' '}
+                (comparten exactamente los mismos socios en la nube).
               </>
             ) : (
               <>
-                Inicia sesión con la cuenta Google autorizada del gimnasio (
-                <span className="font-mono text-[#33C1FF]">{primaryGymEmail}</span>) para guardar
-                socios en la nube y verlos desde el Portal Coaches y el móvil lector.
+                Elige cualquiera de las dos cuentas autorizadas del club (
+                <span className="font-mono text-[#33C1FF]">{OFFICIAL_GYM_EMAIL}</span> o{' '}
+                <span className="font-mono text-[#33C1FF]">{BOOTSTRAPPED_OWNER_EMAIL}</span>):
+                ambas comparten la misma base de datos en tiempo real entre el ordenador, Coach Javi y los móviles.
               </>
             )}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {authUser ? (
+          {authUser && isLiveAdmin ? (
             <button
               type="button"
               onClick={() => void onSignOutGoogle()}
@@ -343,20 +345,31 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
               Cambiar cuenta
             </button>
           ) : (
-            <button
-              type="button"
-              disabled={isSigningIn}
-              onClick={() => void onSignInGoogle()}
-              className="min-h-[44px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] disabled:opacity-60 text-[#04070D] text-xs font-bold flex items-center gap-2 cursor-pointer"
-            >
-              <LogIn className="w-4 h-4" />
-              {isSigningIn ? 'Conectando con Google...' : 'Conectar Google del Gimnasio'}
-            </button>
+            <>
+              <button
+                type="button"
+                disabled={isSigningIn}
+                onClick={() => void onSignInGoogle(OFFICIAL_GYM_EMAIL)}
+                className="min-h-[42px] px-3.5 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] disabled:opacity-60 text-[#04070D] text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <LogIn className="w-4 h-4 shrink-0" />
+                {isSigningIn ? 'Conectando...' : `Entrar: ${OFFICIAL_GYM_EMAIL}`}
+              </button>
+              <button
+                type="button"
+                disabled={isSigningIn}
+                onClick={() => void onSignInGoogle(BOOTSTRAPPED_OWNER_EMAIL)}
+                className="min-h-[42px] px-3.5 rounded-xl bg-[#131B28] hover:border-[#00A8FF] disabled:opacity-60 border border-[#00A8FF]/50 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <LogIn className="w-4 h-4 text-[#33C1FF] shrink-0" />
+                {isSigningIn ? 'Conectando...' : `Entrar: ${BOOTSTRAPPED_OWNER_EMAIL}`}
+              </button>
+            </>
           )}
           <button
             type="button"
             onClick={onOpenTurnstileScanner}
-            className="min-h-[44px] px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-[#04070D] text-xs font-bold flex items-center gap-2 cursor-pointer"
+            className="min-h-[42px] px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-[#04070D] text-xs font-bold flex items-center gap-2 cursor-pointer"
           >
             <Camera className="w-4 h-4" />
             Abrir Lector QR Torno
@@ -370,17 +383,16 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
           <div className="space-y-0.5">
             <p className="text-xs font-bold text-[#33C1FF] flex items-center gap-1.5">
               <KeyRound className="w-3.5 h-3.5" />
-              Cuenta Google del Gimnasio y Coaches Autorizados
+              Cuentas Google del Gimnasio y Coaches Autorizados
             </p>
             <h3 className="text-base font-bold text-white">
-              Cambia al correo oficial de FitnessDreams o añade a tus coaches cuando quieras
+              Ambas cuentas del club están activas y comparten los mismos socios en directo
             </h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Ahora mismo está autorizada tu cuenta{' '}
-              <span className="font-mono text-slate-200">{BOOTSTRAPPED_OWNER_EMAIL}</span>. Cuando
-              tengas el correo oficial del gimnasio (ej.{' '}
-              <span className="font-mono text-[#33C1FF]">fitnessdream...@gmail.com</span>) o quieras
-              que Javi y Joel entren con su Gmail propio, añádelo aquí abajo.
+              Tanto <span className="font-mono text-[#33C1FF]">{OFFICIAL_GYM_EMAIL}</span> como{' '}
+              <span className="font-mono text-slate-200">{BOOTSTRAPPED_OWNER_EMAIL}</span> tienen
+              acceso total permanente a la misma base de datos. También puedes añadir aquí el Gmail
+              propio de Javi o Joel si prefieren entrar con su correo personal.
             </p>
           </div>
           <span className="text-xs font-mono text-emerald-300 shrink-0">

@@ -1,11 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BOOTSTRAPPED_OWNER_EMAIL,
+  OFFICIAL_GYM_EMAIL,
   emailToStaffDocId,
   getStaffRoleLabel,
+  isBootstrappedAdminEmail,
   isValidStaffEmail,
   resolvePrimaryGymEmail,
 } from './staffAuth';
+
+test('isBootstrappedAdminEmail authorizes both fitnessdreamsbenidorm@gmail.com and joseundergroundbnd@gmail.com', () => {
+  assert.equal(isBootstrappedAdminEmail(OFFICIAL_GYM_EMAIL), true);
+  assert.equal(isBootstrappedAdminEmail(BOOTSTRAPPED_OWNER_EMAIL), true);
+  assert.equal(isBootstrappedAdminEmail('  FitnessDreamsBenidorm@Gmail.com '), true);
+  assert.equal(isBootstrappedAdminEmail('JoseUndergroundBnd@Gmail.com'), true);
+  assert.equal(isBootstrappedAdminEmail('socio.prueba@gmail.com'), false);
+  assert.equal(isBootstrappedAdminEmail(null), false);
+});
 
 test('emailToStaffDocId matches Firestore rules lower().replace([^a-z0-9], _) exactly', () => {
   assert.equal(emailToStaffDocId('  FitnesDream@Gmail.com '), 'fitnesdream_gmail_com');

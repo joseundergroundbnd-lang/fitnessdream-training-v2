@@ -24,7 +24,12 @@ service cloud.firestore {
     }
 
     function isBootstrappedAdmin() {
-      return isVerified() && request.auth.token.email == 'joseundergroundbnd@gmail.com';
+      return isVerified()
+        && request.auth.token.email is string
+        && (
+          request.auth.token.email.lower() == 'joseundergroundbnd@gmail.com'
+          || request.auth.token.email.lower() == 'fitnessdreamsbenidorm@gmail.com'
+        );
     }
 
     function callerEmailStaffId() {

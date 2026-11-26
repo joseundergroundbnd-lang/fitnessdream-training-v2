@@ -23,10 +23,12 @@ import {
   type TurnstileScanOutcome,
 } from '../services/liveGymService';
 
+import { BOOTSTRAPPED_OWNER_EMAIL, OFFICIAL_GYM_EMAIL } from '../firebase';
+
 interface TurnstileScannerViewProps {
   authUser: User | null;
   isLiveAdmin: boolean;
-  onSignInGoogle: () => Promise<void>;
+  onSignInGoogle: (loginHintEmail?: string) => Promise<void>;
   liveMembers: LiveGymMember[];
   localFallbackMembers: LiveGymMember[];
   liveAccessLogs: LiveAccessLog[];
@@ -356,24 +358,34 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
       <main className="flex-1 w-full max-w-4xl mx-auto px-4 py-5 space-y-5">
         {/* Auth Prompt for Live Sync with Reception PC */}
         {!isLiveAdmin && (
-          <div className="rounded-2xl bg-[#0D121B] border border-[#00A8FF]/45 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="rounded-2xl bg-[#0D121B] border border-[#00A8FF]/45 p-4 flex flex-col gap-3">
             <div className="space-y-0.5">
               <p className="text-xs font-bold text-[#33C1FF]">
                 Conecta este móvil con el ordenador de recepción
               </p>
               <p className="text-xs text-slate-300">
-                Inicia sesión con la cuenta de Google del gimnasio para validar en tiempo real las
-                cuotas de todos los clientes reales y registrar cada entrada en el PC.
+                Elige cualquiera de las dos cuentas autorizadas del gimnasio: ambas comparten la misma
+                base de datos en vivo y registran cada entrada al instante en el PC.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => void onSignInGoogle()}
-              className="min-h-[42px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shrink-0"
-            >
-              <LogIn className="w-4 h-4" />
-              Conectar Google del Gym
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void onSignInGoogle(OFFICIAL_GYM_EMAIL)}
+                className="min-h-[42px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <LogIn className="w-4 h-4 shrink-0" />
+                Entrar: {OFFICIAL_GYM_EMAIL}
+              </button>
+              <button
+                type="button"
+                onClick={() => void onSignInGoogle(BOOTSTRAPPED_OWNER_EMAIL)}
+                className="min-h-[42px] px-4 rounded-xl bg-[#111927] hover:bg-[#19253A] border border-[#00A8FF]/40 text-[#E2F3FF] text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <LogIn className="w-4 h-4 shrink-0 text-[#33C1FF]" />
+                Entrar: {BOOTSTRAPPED_OWNER_EMAIL}
+              </button>
+            </div>
           </div>
         )}
 

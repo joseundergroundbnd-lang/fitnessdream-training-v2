@@ -96,7 +96,7 @@ interface AdminDashboardViewProps {
     role: AuthorizedStaffRole;
   }) => Promise<{ savedToCloud: boolean; record: AuthorizedStaffRecord }>;
   onRemoveAuthorizedStaff: (staffId: string) => Promise<void>;
-  onSignInGoogle: () => Promise<void>;
+  onSignInGoogle: (loginHintEmail?: string) => Promise<void>;
   onSignOutGoogle: () => Promise<void>;
   liveMembers: LiveGymMember[];
   localDemoMembers: LiveGymMember[];

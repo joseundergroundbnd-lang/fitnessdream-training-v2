@@ -10,8 +10,14 @@ import {
 } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
+import {
+  BOOTSTRAPPED_ADMIN_EMAILS,
+  BOOTSTRAPPED_OWNER_EMAIL,
+  OFFICIAL_GYM_EMAIL,
+  isBootstrappedAdminEmail,
+} from './utils/staffAuth';
 
-export const BOOTSTRAPPED_OWNER_EMAIL = 'joseundergroundbnd@gmail.com';
+export { BOOTSTRAPPED_ADMIN_EMAILS, BOOTSTRAPPED_OWNER_EMAIL, OFFICIAL_GYM_EMAIL };
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -72,12 +78,18 @@ export function handleFirestoreError(
 }
 
 export function isOwnerEmail(email: string | null | undefined): boolean {
-  return Boolean(email && email.toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL.toLowerCase());
+  return isBootstrappedAdminEmail(email);
 }
 
-export async function signInWithGoogleAccount(): Promise<User | null> {
+export async function signInWithGoogleAccount(loginHintEmail?: string): Promise<User | null> {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters(
+    loginHintEmail
+      ? { prompt: 'select_account', login_hint: loginHintEmail.trim().toLowerCase() }
+      : { prompt: 'select_account' }
+  );
   try {
-    const result = await signInWithPopup(auth, googleProvider);
+    const result = await signInWithPopup(auth, provider);
     return result.user;
   } catch (err) {
     const code =
@@ -88,7 +100,7 @@ export async function signInWithGoogleAccount(): Promise<User | null> {
       code === 'auth/popup-blocked' ||
       code === 'auth/operation-not-supported-in-this-environment'
     ) {
-      await signInWithRedirect(auth, googleProvider);
+      await signInWithRedirect(auth, provider);
       return null;
     }
     throw err;

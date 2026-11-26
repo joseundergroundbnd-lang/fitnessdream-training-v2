@@ -25,6 +25,7 @@ import {
   X,
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
+import { BOOTSTRAPPED_OWNER_EMAIL, OFFICIAL_GYM_EMAIL } from '../firebase';
 import { COACH_TEAM } from '../data/seedData';
 import { getMachineByCode, TELJU_MACHINES } from '../data/teljuCatalog';
 import type { LiveGymMember } from '../services/liveGymService';
@@ -74,7 +75,7 @@ interface CoachRoutineBuilderProps {
   isLiveAdmin: boolean;
   isSigningIn?: boolean;
   primaryGymEmail?: string;
-  onSignInGoogle: () => Promise<void>;
+  onSignInGoogle: (loginHintEmail?: string) => Promise<void>;
   onSignOutGoogle?: () => Promise<void>;
   liveMembers: LiveGymMember[];
   localDemoMembers: LiveGymMember[];
@@ -704,36 +705,48 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
                 <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
                 <span className="font-medium">
                   Conectado como <strong>{authUser.email}</strong> (cuenta de socio, sin acceso de
-                  coach). Entra con <span className="font-mono text-[#33C1FF]">{primaryGymEmail}</span>{' '}
-                  o autoriza este correo en Dirección.
-                </span>
-                {onSignOutGoogle && (
-                  <button
-                    type="button"
-                    onClick={() => void onSignOutGoogle()}
-                    className="px-2.5 py-1 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] font-bold cursor-pointer whitespace-nowrap"
-                  >
-                    Cambiar cuenta
-                  </button>
-                )}
-              </div>
-            ) : (
-              <>
-                <span className="text-amber-300 font-medium inline-flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
-                  Sin conectar a Google (Modo local) · Conecta{' '}
-                  <span className="font-mono text-[#33C1FF]">{primaryGymEmail}</span> para ver
-                  socios reales desde cualquier dispositivo
+                  coach). Elige una cuenta autorizada del club:
                 </span>
                 <button
                   type="button"
                   disabled={isSigningIn}
-                  onClick={() => void onSignInGoogle()}
+                  onClick={() => void onSignInGoogle(OFFICIAL_GYM_EMAIL)}
+                  className="px-2.5 py-1 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] font-bold cursor-pointer whitespace-nowrap"
+                >
+                  {OFFICIAL_GYM_EMAIL}
+                </button>
+                <button
+                  type="button"
+                  disabled={isSigningIn}
+                  onClick={() => void onSignInGoogle(BOOTSTRAPPED_OWNER_EMAIL)}
+                  className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white font-bold cursor-pointer whitespace-nowrap"
+                >
+                  {BOOTSTRAPPED_OWNER_EMAIL}
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-amber-300 font-medium inline-flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                  Sin conectar a Google · Elige con cuál entrar (comparten los mismos socios):
+                </span>
+                <button
+                  type="button"
+                  disabled={isSigningIn}
+                  onClick={() => void onSignInGoogle(OFFICIAL_GYM_EMAIL)}
                   className="min-h-[36px] px-3 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] disabled:opacity-60 text-[#04070D] text-xs font-bold cursor-pointer whitespace-nowrap"
                 >
-                  {isSigningIn ? 'Conectando Google...' : 'Conectar Google Coach'}
+                  {isSigningIn ? 'Conectando...' : `Entrar: ${OFFICIAL_GYM_EMAIL}`}
                 </button>
-              </>
+                <button
+                  type="button"
+                  disabled={isSigningIn}
+                  onClick={() => void onSignInGoogle(BOOTSTRAPPED_OWNER_EMAIL)}
+                  className="min-h-[36px] px-3 rounded-lg bg-[#06080D] hover:border-[#00A8FF] disabled:opacity-60 border border-[#00A8FF]/50 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
+                >
+                  {isSigningIn ? 'Conectando...' : `Entrar: ${BOOTSTRAPPED_OWNER_EMAIL}`}
+                </button>
+              </div>
             )}
           </div>
 
