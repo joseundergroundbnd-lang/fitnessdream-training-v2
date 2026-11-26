@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
+  Bell,
+  BellOff,
   Calculator,
   Check,
   Clock,
@@ -16,6 +18,7 @@ import {
   UserPlus,
   X,
 } from 'lucide-react';
+import type { User } from 'firebase/auth';
 import { COACH_TEAM, TELJU_LOGO_URL } from '../data/seedData';
 import { getMachineByCode, TELJU_MACHINES } from '../data/teljuCatalog';
 import type {
@@ -28,7 +31,8 @@ import type {
   MuscleGroup,
   TeljuMachine,
 } from '../types/gym';
-import { CoachMessageThread } from './CoachMessageThread';
+import type { NotificationPermissionState } from '../utils/notifications';
+import { CoachMessageThread, type SendDirectMessageResult } from './CoachMessageThread';
 import {
   calculateBarbellPlates,
   calculateEstimated1RM,
@@ -55,7 +59,16 @@ interface WorkoutViewProps {
   onAddMachine: (machine: TeljuMachine) => void;
   profile: MemberProfile;
   directMessages: DirectMessage[];
-  onSendDirectMessage: (msg: Omit<DirectMessage, 'id' | 'timestampLabel'>) => void;
+  onSendDirectMessage: (
+    msg: Omit<DirectMessage, 'id' | 'timestampLabel'>
+  ) => Promise<SendDirectMessageResult | void> | SendDirectMessageResult | void;
+  authUser?: User | null;
+  onSignInGoogle?: () => Promise<void>;
+  notificationPermission?: NotificationPermissionState;
+  onRequestNotificationPermission?: () => Promise<void>;
+  onTestNotification?: () => Promise<void>;
+  requestedSubtab?: 'activo' | 'coach' | 'mensajes' | 'catalogo' | null;
+  onConsumeRequestedSubtab?: () => void;
 }
 
 const CATEGORY_FILTERS: ('Todos' | EquipmentCategory)[] = [
@@ -93,8 +106,24 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
   profile,
   directMessages,
   onSendDirectMessage,
+  authUser,
+  onSignInGoogle,
+  notificationPermission,
+  onRequestNotificationPermission,
+  onTestNotification,
+  requestedSubtab,
+  onConsumeRequestedSubtab,
 }) => {
-  const [subtab, setSubtab] = useState<'activo' | 'coach' | 'mensajes' | 'catalogo'>('activo');
+  const [subtab, setSubtab] = useState<'activo' | 'coach' | 'mensajes' | 'catalogo'>(
+    requestedSubtab ?? 'activo'
+  );
+
+  useEffect(() => {
+    if (!requestedSubtab) return;
+    setSubtab(requestedSubtab);
+    onConsumeRequestedSubtab?.();
+  }, [requestedSubtab, onConsumeRequestedSubtab]);
+
   const memberMessagesCount = useMemo(
     () => directMessages.filter((m) => m.memberId === 'current-user').length,
     [directMessages]
@@ -1034,6 +1063,53 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
                 );
               })}
             </div>
+            {/* Member Notification Permission Card */}
+            {onRequestNotificationPermission && notificationPermission !== 'unsupported' && (
+              <div className="rounded-xl bg-[#06080D] border border-white/10 p-3.5 space-y-2.5">
+                <div className="flex items-center gap-2">
+                  {notificationPermission === 'granted' ? (
+                    <Bell className="w-4 h-4 text-emerald-400 shrink-0" />
+                  ) : notificationPermission === 'denied' ? (
+                    <BellOff className="w-4 h-4 text-rose-400 shrink-0" />
+                  ) : (
+                    <Bell className="w-4 h-4 text-[#00A8FF] shrink-0" />
+                  )}
+                  <p className="text-xs font-bold text-white">
+                    {notificationPermission === 'granted'
+                      ? 'Notificaciones activadas'
+                      : notificationPermission === 'denied'
+                        ? 'Notificaciones bloqueadas'
+                        : 'Recibe avisos de tu Coach'}
+                  </p>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  {notificationPermission === 'granted'
+                    ? 'Te avisaremos al instante cuando Javi o Joel te respondan o te suban una nueva rutina.'
+                    : notificationPermission === 'denied'
+                      ? 'Activa el permiso de notificaciones en los ajustes de Chrome/Safari para recibir avisos en tu móvil.'
+                      : 'Activa los permisos para que te salte una notificación en cuanto tu Coach te envíe un texto, audio o rutina.'}
+                </p>
+                {notificationPermission === 'granted' ? (
+                  onTestNotification && (
+                    <button
+                      type="button"
+                      onClick={() => void onTestNotification()}
+                      className="w-full min-h-[36px] px-3 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/40 text-xs font-semibold text-emerald-200 cursor-pointer"
+                    >
+                      Probar notificación ahora
+                    </button>
+                  )
+                ) : notificationPermission !== 'denied' ? (
+                  <button
+                    type="button"
+                    onClick={() => void onRequestNotificationPermission()}
+                    className="w-full min-h-[38px] px-3 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold cursor-pointer"
+                  >
+                    Dar permiso de notificaciones
+                  </button>
+                ) : null}
+              </div>
+            )}
           </div>
 
           {/* Right 8 cols: Bidirectional Text + Voice Audio Thread */}
@@ -1046,6 +1122,16 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
               memberAvatar={profile.avatarUrl}
               messages={directMessages}
               onSendMessage={onSendDirectMessage}
+              isCloudConnected={Boolean(authUser)}
+              cloudStatusHint={
+                authUser
+                  ? `Conectado como ${authUser.email} · Tus textos y audios llegan al instante a Coach ${activeCoach.name}.`
+                  : 'Conecta tu cuenta de Google para que Coach Javi y Joel reciban tus mensajes y audios en directo.'
+              }
+              onConnectGoogle={onSignInGoogle}
+              notificationPermission={notificationPermission}
+              onRequestNotificationPermission={onRequestNotificationPermission}
+              onTestNotification={onTestNotification}
             />
           </div>
         </div>

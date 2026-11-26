@@ -45,7 +45,10 @@ import {
 import type { User } from 'firebase/auth';
 import type { LiveAccessLog, LiveGymMember } from '../services/liveGymService';
 import type { FeeStatus } from '../types/gym';
-import { CoachMessageThread } from './CoachMessageThread';
+import type { AuthorizedStaffRecord, AuthorizedStaffRole } from '../utils/staffAuth';
+import { buildCoachChatContacts } from '../utils/messaging';
+import type { NotificationPermissionState } from '../utils/notifications';
+import { CoachMessageThread, type SendDirectMessageResult } from './CoachMessageThread';
 import { CoachRoutineBuilder } from './CoachRoutineBuilder';
 import type { PresentationKitTab } from './PresentationKitModal';
 import { ReceptionLivePanel } from './ReceptionLivePanel';
@@ -75,10 +78,24 @@ interface AdminDashboardViewProps {
   onPreviewRoutinesInMemberView: () => void;
   memberProfile: MemberProfile;
   directMessages: DirectMessage[];
-  onSendDirectMessage: (msg: Omit<DirectMessage, 'id' | 'timestampLabel'>) => void;
+  onSendDirectMessage: (
+    msg: Omit<DirectMessage, 'id' | 'timestampLabel'>
+  ) => Promise<SendDirectMessageResult | void> | SendDirectMessageResult | void;
+  notificationPermission?: NotificationPermissionState;
+  onRequestNotificationPermission?: () => Promise<void>;
+  onTestNotification?: () => Promise<void>;
   onOpenPresentationKit: (tab: PresentationKitTab) => void;
   authUser: User | null;
   isLiveAdmin: boolean;
+  isSigningIn: boolean;
+  primaryGymEmail: string;
+  authorizedStaff: AuthorizedStaffRecord[];
+  onAddAuthorizedStaff: (input: {
+    email: string;
+    label: string;
+    role: AuthorizedStaffRole;
+  }) => Promise<{ savedToCloud: boolean; record: AuthorizedStaffRecord }>;
+  onRemoveAuthorizedStaff: (staffId: string) => Promise<void>;
   onSignInGoogle: () => Promise<void>;
   onSignOutGoogle: () => Promise<void>;
   liveMembers: LiveGymMember[];
@@ -92,7 +109,7 @@ interface AdminDashboardViewProps {
     tier: 'Socio Fundador' | 'Socio Club';
     feeStatus: FeeStatus;
     assignedCoach: string;
-  }) => Promise<void>;
+  }) => Promise<{ savedToCloud: boolean; member: LiveGymMember }>;
   onOpenTurnstileScanner: () => void;
 }
 
@@ -129,9 +146,17 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   memberProfile,
   directMessages,
   onSendDirectMessage,
+  notificationPermission,
+  onRequestNotificationPermission,
+  onTestNotification,
   onOpenPresentationKit,
   authUser,
   isLiveAdmin,
+  isSigningIn,
+  primaryGymEmail,
+  authorizedStaff,
+  onAddAuthorizedStaff,
+  onRemoveAuthorizedStaff,
   onSignInGoogle,
   onSignOutGoogle,
   liveMembers,
@@ -144,7 +169,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [subtab, setSubtab] = useState<
     'recepcion' | 'retencion' | 'analitica' | 'retos' | 'rutinas' | 'mensajes'
   >('recepcion');
-  const [chatMemberId, setChatMemberId] = useState<string>('current-user');
+  const [chatMemberId, setChatMemberId] = useState<string>('');
   const activeCoachFirstName = activeCoach.name.split(' ')[0];
 
   const coachThreadCount = useMemo(
@@ -153,23 +178,66 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   );
 
   const chatContacts = useMemo(() => {
-    const activeAppMember = {
-      id: 'current-user',
-      name: memberProfile.name,
-      subtitle: `${memberProfile.tier} · Socio activo en App`,
-      avatarUrl: memberProfile.avatarUrl,
-    };
-    const directoryContacts = members.slice(0, 6).map((m) => ({
-      id: m.id,
-      name: m.name,
-      subtitle: `${m.memberTag} · ${m.preferredActivity}`,
-      avatarUrl: undefined as string | undefined,
-    }));
-    return [activeAppMember, ...directoryContacts];
-  }, [memberProfile.avatarUrl, memberProfile.name, memberProfile.tier, members]);
+    const dirMap = new Map<
+      string,
+      {
+        id: string;
+        uid: string;
+        name: string;
+        memberCode: string;
+        tier: string;
+        isCloud: boolean;
+        isRealMember: boolean;
+      }
+    >();
+    for (const lm of liveMembers) {
+      dirMap.set(lm.id, {
+        id: lm.id,
+        uid: lm.uid,
+        name: lm.name,
+        memberCode: lm.memberCode,
+        tier: lm.tier,
+        isCloud: true,
+        isRealMember: true,
+      });
+    }
+    for (const wm of localDemoMembers) {
+      if (!dirMap.has(wm.id)) {
+        dirMap.set(wm.id, {
+          id: wm.id,
+          uid: wm.uid,
+          name: wm.name,
+          memberCode: wm.memberCode,
+          tier: wm.tier,
+          isCloud: false,
+          isRealMember: Boolean(wm.isRealMember),
+        });
+      }
+    }
+    for (const m of members.slice(0, 6)) {
+      if (!dirMap.has(m.id)) {
+        dirMap.set(m.id, {
+          id: m.id,
+          uid: m.id,
+          name: m.name,
+          memberCode: m.memberTag,
+          tier: m.plan,
+          isCloud: false,
+          isRealMember: false,
+        });
+      }
+    }
+
+    return buildCoachChatContacts({
+      directoryMembers: Array.from(dirMap.values()),
+      directMessages,
+      activeCoachId: activeCoach.id,
+      authUid: authUser?.uid ?? null,
+    });
+  }, [activeCoach.id, authUser?.uid, directMessages, liveMembers, localDemoMembers, members]);
 
   const activeChatContact = useMemo(
-    () => chatContacts.find((c) => c.id === chatMemberId) ?? chatContacts[0],
+    () => chatContacts.find((c) => c.threadMemberId === chatMemberId) ?? chatContacts[0],
     [chatContacts, chatMemberId]
   );
 
@@ -527,6 +595,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           activeCoach={activeCoach}
           authUser={authUser}
           isLiveAdmin={isLiveAdmin}
+          isSigningIn={isSigningIn}
+          primaryGymEmail={primaryGymEmail}
+          authorizedStaff={authorizedStaff}
+          onAddAuthorizedStaff={onAddAuthorizedStaff}
+          onRemoveAuthorizedStaff={onRemoveAuthorizedStaff}
           onSignInGoogle={onSignInGoogle}
           onSignOutGoogle={onSignOutGoogle}
           liveMembers={liveMembers}
@@ -1329,10 +1402,18 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           onSelectCoach={onSelectCoach}
           authUser={authUser}
           isLiveAdmin={isLiveAdmin}
+          isSigningIn={isSigningIn}
+          primaryGymEmail={primaryGymEmail}
           onSignInGoogle={onSignInGoogle}
+          onSignOutGoogle={onSignOutGoogle}
           liveMembers={liveMembers}
           localDemoMembers={localDemoMembers}
           coachRoutines={coachRoutines}
+          directMessages={directMessages}
+          onSendDirectMessage={onSendDirectMessage}
+          notificationPermission={notificationPermission}
+          onRequestNotificationPermission={onRequestNotificationPermission}
+          onTestNotification={onTestNotification}
           onSendCoachRoutine={onSendCoachRoutine}
           onPreviewRoutinesInMemberView={onPreviewRoutinesInMemberView}
           onOpenPresentationKit={onOpenPresentationKit}
@@ -1356,31 +1437,40 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               </p>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
               {chatContacts.map((contact) => {
-                const isSelected = activeChatContact.id === contact.id;
-                const msgCount = directMessages.filter(
-                  (m) => m.coachId === activeCoach.id && m.memberId === contact.id
-                ).length;
-
+                const isSelected = activeChatContact.threadMemberId === contact.threadMemberId;
                 return (
                   <button
-                    key={contact.id}
+                    key={contact.threadMemberId}
                     type="button"
-                    onClick={() => setChatMemberId(contact.id)}
+                    onClick={() => setChatMemberId(contact.threadMemberId)}
                     aria-pressed={isSelected}
                     className={`w-full p-3 rounded-xl border text-left flex items-center justify-between gap-3 transition-colors cursor-pointer ${
                       isSelected
                         ? 'bg-[#00A8FF]/14 border-[#00A8FF]'
-                        : 'bg-[#06080D] border-white/10 hover:border-white/25'
+                        : contact.hasMemberReplyWaiting
+                          ? 'bg-emerald-950/30 border-emerald-500/40 hover:border-emerald-400'
+                          : 'bg-[#06080D] border-white/10 hover:border-white/25'
                     }`}
                   >
                     <div className="min-w-0">
-                      <p className="text-sm font-semibold text-white truncate">{contact.name}</p>
-                      <p className="text-xs text-slate-400 truncate">{contact.subtitle}</p>
+                      <p className="text-sm font-semibold text-white truncate flex items-center gap-1.5">
+                        {contact.hasMemberReplyWaiting && (
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                        )}
+                        <span className="truncate">{contact.name}</span>
+                      </p>
+                      <p className="text-xs text-slate-400 truncate">
+                        {contact.latestMessage
+                          ? contact.latestMessage.kind === 'audio'
+                            ? `Audio (${contact.latestMessage.audioDurationSec ?? 5}s) · ${contact.latestMessage.timestampLabel}`
+                            : `${(contact.latestMessage.text || '').slice(0, 36)} · ${contact.latestMessage.timestampLabel}`
+                          : contact.subtitle}
+                      </p>
                     </div>
                     <span className="text-xs font-mono tabular-nums text-[#33C1FF] shrink-0">
-                      {msgCount}
+                      {contact.activeCoachCount}
                     </span>
                   </button>
                 );
@@ -1393,11 +1483,27 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             <CoachMessageThread
               viewerRole="coach"
               coach={activeCoach}
-              memberId={activeChatContact.id}
+              memberId={activeChatContact.threadMemberId}
               memberName={activeChatContact.name}
-              memberAvatar={activeChatContact.avatarUrl}
+              memberAvatar={
+                activeChatContact.threadMemberId === 'current-user'
+                  ? memberProfile.avatarUrl
+                  : undefined
+              }
               messages={directMessages}
               onSendMessage={onSendDirectMessage}
+              isCloudConnected={Boolean(authUser && isLiveAdmin)}
+              cloudStatusHint={
+                authUser && isLiveAdmin
+                  ? `Conectado como ${authUser.email} · Recibiendo mensajes y audios reales.`
+                  : authUser
+                    ? `Sesión ${authUser.email} sin acceso de Dirección/Coach. Entra con ${primaryGymEmail}.`
+                    : `Conecta ${primaryGymEmail} para leer y responder mensajes reales en directo.`
+              }
+              onConnectGoogle={onSignInGoogle}
+              notificationPermission={notificationPermission}
+              onRequestNotificationPermission={onRequestNotificationPermission}
+              onTestNotification={onTestNotification}
             />
           </div>
         </div>

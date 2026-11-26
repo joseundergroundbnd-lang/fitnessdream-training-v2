@@ -1,6 +1,8 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
+  Bell,
+  BellOff,
   Check,
   Clock,
   Copy,
@@ -10,6 +12,8 @@ import {
   FileText,
   Flame,
   Link2,
+  LogOut,
+  MessageCircle,
   PlayCircle,
   Plus,
   Search,
@@ -28,6 +32,7 @@ import type {
   CoachRoutine,
   CoachRoutineCardioBlock,
   CoachRoutineExercise,
+  DirectMessage,
   MuscleGroup,
   PyramidPreset,
   RepSchemeMode,
@@ -54,6 +59,9 @@ import {
   buildReceptionPcUrl,
   resolveDirectPublicUrl,
 } from '../utils/pwaUtils';
+import { buildCoachChatContacts } from '../utils/messaging';
+import type { NotificationPermissionState } from '../utils/notifications';
+import { CoachMessageThread, type SendDirectMessageResult } from './CoachMessageThread';
 import type { PresentationKitTab } from './PresentationKitModal';
 
 interface CoachRoutineBuilderProps {
@@ -61,10 +69,20 @@ interface CoachRoutineBuilderProps {
   onSelectCoach: (coachId: string) => void;
   authUser: User | null;
   isLiveAdmin: boolean;
+  isSigningIn?: boolean;
+  primaryGymEmail?: string;
   onSignInGoogle: () => Promise<void>;
+  onSignOutGoogle?: () => Promise<void>;
   liveMembers: LiveGymMember[];
   localDemoMembers: LiveGymMember[];
   coachRoutines: CoachRoutine[];
+  directMessages?: DirectMessage[];
+  onSendDirectMessage?: (
+    msg: Omit<DirectMessage, 'id' | 'timestampLabel'>
+  ) => Promise<SendDirectMessageResult | void> | SendDirectMessageResult | void;
+  notificationPermission?: NotificationPermissionState;
+  onRequestNotificationPermission?: () => Promise<void>;
+  onTestNotification?: () => Promise<void>;
   onSendCoachRoutine: (routine: CoachRoutine) => void;
   onPreviewRoutinesInMemberView: () => void;
   onOpenPresentationKit: (tab: PresentationKitTab) => void;
@@ -95,16 +113,26 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
   onSelectCoach,
   authUser,
   isLiveAdmin,
+  isSigningIn = false,
+  primaryGymEmail = 'joseundergroundbnd@gmail.com',
   onSignInGoogle,
+  onSignOutGoogle,
   liveMembers,
   localDemoMembers,
   coachRoutines,
+  directMessages = [],
+  onSendDirectMessage,
+  notificationPermission,
+  onRequestNotificationPermission,
+  onTestNotification,
   onSendCoachRoutine,
   onPreviewRoutinesInMemberView,
   onOpenPresentationKit,
   isStandaloneCoachPortal = false,
 }) => {
-  // Unified searchable member database: real Firestore members first, then demo fallback without duplicates
+  const [portalSection, setPortalSection] = useState<'rutinas' | 'chat'>('rutinas');
+
+  // Unified searchable member database: real Firestore members first, then reception walk-ins & demo fallback without duplicates
   const allDirectoryMembers = useMemo(() => {
     const map = new Map<string, LiveGymMember & { isCloud: boolean }>();
     for (const m of liveMembers) {
@@ -118,11 +146,81 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
     return Array.from(map.values());
   }, [liveMembers, localDemoMembers]);
 
-  // Step 1: Member selection (exclusive recipient OR 'all')
+  // Unified chat contacts: combines directory members AND any real member who sent a message (e.g. Unai Martínez)
+  const chatContacts = useMemo(
+    () =>
+      buildCoachChatContacts({
+        directoryMembers: allDirectoryMembers,
+        directMessages,
+        activeCoachId: activeCoach.id,
+        authUid: authUser?.uid ?? null,
+      }),
+    [allDirectoryMembers, directMessages, activeCoach.id, authUser?.uid]
+  );
+
+  const realMembersCount = useMemo(
+    () => allDirectoryMembers.filter((m) => m.isCloud || m.isRealMember).length,
+    [allDirectoryMembers]
+  );
+
+  const activeCoachMessagesCount = useMemo(
+    () => directMessages.filter((m) => m.coachId === activeCoach.id).length,
+    [directMessages, activeCoach.id]
+  );
+
+  const waitingChatsCount = useMemo(
+    () => chatContacts.filter((c) => c.hasMemberReplyWaiting).length,
+    [chatContacts]
+  );
+
+  // Step 1: Member selection (exclusive recipient OR 'all') + active chat thread selection
   const [memberSearch, setMemberSearch] = useState('');
   const [selectedRecipientId, setSelectedRecipientId] = useState<string>(
     () => allDirectoryMembers[0]?.id ?? 'all'
   );
+  const [selectedChatThreadId, setSelectedChatThreadId] = useState<string | null>(null);
+
+  // If the first real cloud/reception member arrives while selection is still missing, keep it valid
+  useEffect(() => {
+    if (selectedRecipientId === 'all') return;
+    const stillExists = allDirectoryMembers.some((m) => m.id === selectedRecipientId);
+    if (!stillExists && allDirectoryMembers[0]) {
+      setSelectedRecipientId(allDirectoryMembers[0].id);
+    }
+  }, [allDirectoryMembers, selectedRecipientId]);
+
+  const activeChatContact = useMemo(() => {
+    if (selectedChatThreadId) {
+      const explicit = chatContacts.find((c) => c.threadMemberId === selectedChatThreadId);
+      if (explicit) return explicit;
+    }
+    if (selectedRecipientId !== 'all') {
+      const linked = chatContacts.find((c) => c.recipientMemberId === selectedRecipientId);
+      if (linked) return linked;
+    }
+    return chatContacts[0] ?? null;
+  }, [chatContacts, selectedChatThreadId, selectedRecipientId]);
+
+  const filteredChatContacts = useMemo(() => {
+    const q = memberSearch.trim().toLowerCase();
+    if (!q) return chatContacts;
+    return chatContacts.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.subtitle.toLowerCase().includes(q) ||
+        (c.memberCode && c.memberCode.toLowerCase().includes(q))
+    );
+  }, [chatContacts, memberSearch]);
+
+  const handleSelectChatContact = (threadMemberId: string, recipientMemberId: string | null) => {
+    setSelectedChatThreadId(threadMemberId);
+    if (
+      recipientMemberId &&
+      allDirectoryMembers.some((m) => m.id === recipientMemberId)
+    ) {
+      setSelectedRecipientId(recipientMemberId);
+    }
+  };
 
   // Step 2: Plan duration & metadata
   const [frequency, setFrequency] = useState<RoutineFrequency>('Semanal');
@@ -378,8 +476,8 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
     setDayLabel(DEFAULT_DAY_LABEL_BY_FREQ[nextFreq]);
   };
 
-  const handleSubmitRoutine = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmitRoutine = (e?: React.FormEvent) => {
+    e?.preventDefault();
     setFormError(null);
     setFormSuccess(null);
 
@@ -517,28 +615,87 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pt-3 border-t border-white/8">
           <div className="flex flex-wrap items-center gap-2.5 text-xs">
             {authUser && isLiveAdmin ? (
-              <span className="text-emerald-300 font-semibold">
-                Conectado en tiempo real ({authUser.email}) · {liveMembers.length} socios reales
-                en nube
-              </span>
+              <div className="inline-flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl bg-emerald-950/45 border border-emerald-500/45 text-emerald-200">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                <span className="font-semibold">
+                  CONECTADO ({authUser.email}) · {liveMembers.length} socios reales en la nube
+                </span>
+                {onSignOutGoogle && (
+                  <button
+                    type="button"
+                    onClick={() => void onSignOutGoogle()}
+                    className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/10 hover:bg-white/20 text-white font-semibold cursor-pointer"
+                  >
+                    <LogOut className="w-3 h-3" />
+                    Cambiar cuenta
+                  </button>
+                )}
+              </div>
+            ) : authUser ? (
+              <div className="inline-flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl bg-amber-950/40 border border-amber-500/45 text-amber-200">
+                <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                <span className="font-medium">
+                  Conectado como <strong>{authUser.email}</strong> (cuenta de socio, sin acceso de
+                  coach). Entra con <span className="font-mono text-[#33C1FF]">{primaryGymEmail}</span>{' '}
+                  o autoriza este correo en Dirección.
+                </span>
+                {onSignOutGoogle && (
+                  <button
+                    type="button"
+                    onClick={() => void onSignOutGoogle()}
+                    className="px-2.5 py-1 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] font-bold cursor-pointer whitespace-nowrap"
+                  >
+                    Cambiar cuenta
+                  </button>
+                )}
+              </div>
             ) : (
               <>
-                <span className="text-amber-300 font-medium">
-                  Modo local activo · Inicia sesión con Google del gimnasio para ver todos los
-                  socios reales en directo
+                <span className="text-amber-300 font-medium inline-flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                  Sin conectar a Google (Modo local) · Conecta{' '}
+                  <span className="font-mono text-[#33C1FF]">{primaryGymEmail}</span> para ver
+                  socios reales desde cualquier dispositivo
                 </span>
                 <button
                   type="button"
+                  disabled={isSigningIn}
                   onClick={() => void onSignInGoogle()}
-                  className="min-h-[36px] px-3 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold cursor-pointer whitespace-nowrap"
+                  className="min-h-[36px] px-3 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] disabled:opacity-60 text-[#04070D] text-xs font-bold cursor-pointer whitespace-nowrap"
                 >
-                  Conectar Google Coach
+                  {isSigningIn ? 'Conectando Google...' : 'Conectar Google Coach'}
                 </button>
               </>
             )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {onRequestNotificationPermission && notificationPermission !== 'unsupported' && (
+              notificationPermission === 'granted' ? (
+                <button
+                  type="button"
+                  onClick={() => void onTestNotification?.()}
+                  className="min-h-[38px] px-3 rounded-lg bg-emerald-950/55 hover:bg-emerald-900/60 border border-emerald-500/45 text-xs font-semibold text-emerald-200 flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <Bell className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Avisos Coach activos (Probar)</span>
+                </button>
+              ) : notificationPermission === 'denied' ? (
+                <span className="min-h-[38px] px-3 rounded-lg bg-rose-950/50 border border-rose-500/40 text-xs font-semibold text-rose-200 inline-flex items-center gap-1.5 whitespace-nowrap">
+                  <BellOff className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Notificaciones bloqueadas</span>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void onRequestNotificationPermission()}
+                  className="min-h-[38px] px-3 rounded-lg bg-[#00A8FF]/18 hover:bg-[#00A8FF] hover:text-[#04070D] border border-[#00A8FF]/60 text-xs font-bold text-[#33C1FF] flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
+                >
+                  <Bell className="w-3.5 h-3.5" />
+                  <span>Activar notificaciones Coach</span>
+                </button>
+              )
+            )}
             <button
               type="button"
               onClick={() => onOpenPresentationKit('coach-pdf')}
@@ -604,13 +761,179 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
             </div>
           </div>
         )}
+        {/* Portal Mode Switcher: Routine Builder vs Live Member Chat & Voice Notes */}
+        {onSendDirectMessage && (
+          <div
+            className="flex flex-wrap items-center gap-2 pt-3 border-t border-white/8"
+            role="tablist"
+            aria-label="Herramientas del Portal Coaches"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={portalSection === 'rutinas'}
+              onClick={() => setPortalSection('rutinas')}
+              className={`min-h-[42px] px-4 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer transition-colors ${
+                portalSection === 'rutinas'
+                  ? 'bg-[#00A8FF] text-[#04070D]'
+                  : 'bg-[#06080D] border border-white/12 text-slate-300 hover:text-white hover:border-[#00A8FF]/50'
+              }`}
+            >
+              <Dumbbell className="w-4 h-4 shrink-0" />
+              <span>Constructor de Rutinas</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={portalSection === 'chat'}
+              onClick={() => setPortalSection('chat')}
+              className={`min-h-[42px] px-4 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer transition-colors ${
+                portalSection === 'chat'
+                  ? 'bg-[#00A8FF] text-[#04070D]'
+                  : 'bg-[#06080D] border border-white/12 text-slate-300 hover:text-white hover:border-[#00A8FF]/50'
+              }`}
+            >
+              <MessageCircle className="w-4 h-4 shrink-0" />
+              <span>Chat y Audios con Socios</span>
+              <span
+                className={`px-1.5 py-0.5 rounded-md text-[11px] font-mono tabular-nums ${
+                  portalSection === 'chat'
+                    ? 'bg-[#04070D]/20 text-[#04070D]'
+                    : waitingChatsCount > 0
+                      ? 'bg-emerald-500/25 text-emerald-300'
+                      : 'bg-[#00A8FF]/18 text-[#33C1FF]'
+                }`}
+              >
+                {waitingChatsCount > 0 ? `${waitingChatsCount} nuevos · ` : ''}
+                {activeCoachMessagesCount}
+              </span>
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* MAIN 2-COLUMN WORKSPACE: LEFT = 4-STEP BUILDER · RIGHT = LIVE SUMMARY + SENT HISTORY */}
-      <form
-        onSubmit={handleSubmitRoutine}
-        className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start"
-      >
+      {/* LIVE BIDIRECTIONAL COACH <-> REAL MEMBER CHAT & VOICE AUDIO INBOX */}
+      {portalSection === 'chat' && onSendDirectMessage && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <section className="lg:col-span-4 rounded-2xl bg-[#0D121B] border border-white/10 p-5 space-y-4">
+            <div>
+              <p className="text-xs font-semibold text-[#33C1FF]">
+                Comunicación Directa · Coach {activeCoach.name}
+              </p>
+              <h3 className="text-lg font-bold text-white mt-0.5">
+                Bandeja de Socios (Texto y Audio)
+              </h3>
+              <p className="text-xs text-slate-400 mt-1">
+                Los socios con mensajes recién recibidos aparecen primero. Pulsa cualquiera para
+                escuchar sus audios y responder en directo.
+              </p>
+            </div>
+
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="search"
+                value={memberSearch}
+                onChange={(e) => setMemberSearch(e.target.value)}
+                placeholder="Buscar socio por nombre o código FD-..."
+                aria-label="Buscar socio para chatear"
+                className="w-full min-h-[42px] pl-10 pr-3.5 rounded-xl bg-[#06080D] border border-white/12 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00A8FF]"
+              />
+            </div>
+
+            <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
+              {filteredChatContacts.map((contact) => {
+                const isSelected = activeChatContact?.threadMemberId === contact.threadMemberId;
+                return (
+                  <button
+                    key={contact.threadMemberId}
+                    type="button"
+                    onClick={() =>
+                      handleSelectChatContact(contact.threadMemberId, contact.recipientMemberId)
+                    }
+                    aria-pressed={isSelected}
+                    className={`w-full p-3 rounded-xl border text-left flex items-center justify-between gap-2.5 transition-colors cursor-pointer ${
+                      isSelected
+                        ? 'bg-[#00A8FF]/14 border-[#00A8FF]'
+                        : contact.hasMemberReplyWaiting
+                          ? 'bg-emerald-950/30 border-emerald-500/40 hover:border-emerald-400'
+                          : 'bg-[#06080D] border-white/10 hover:border-white/25'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-white truncate flex items-center gap-1.5">
+                        {contact.hasMemberReplyWaiting && (
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                        )}
+                        <span className="truncate">{contact.name}</span>
+                        {contact.isCloud ? (
+                          <span className="text-[10px] font-mono text-emerald-300 shrink-0">
+                            · Nube
+                          </span>
+                        ) : contact.isRealMember ? (
+                          <span className="text-[10px] font-mono text-[#33C1FF] shrink-0">
+                            · Alta
+                          </span>
+                        ) : null}
+                      </p>
+                      <p className="text-xs font-mono text-slate-400 truncate">
+                        {contact.latestMessage
+                          ? contact.latestMessage.kind === 'audio'
+                            ? `Audio (${contact.latestMessage.audioDurationSec ?? 5}s) · ${contact.latestMessage.timestampLabel}`
+                            : `${(contact.latestMessage.text || '').slice(0, 36)} · ${contact.latestMessage.timestampLabel}`
+                          : contact.subtitle}
+                      </p>
+                      {contact.otherCoachCount > 0 && contact.activeCoachCount === 0 && (
+                        <p className="text-[10px] text-amber-300 mt-0.5">
+                          Tiene {contact.otherCoachCount} msg con otro coach
+                        </p>
+                      )}
+                    </div>
+                    <span
+                      className={`text-xs font-mono tabular-nums shrink-0 px-2 py-0.5 rounded-md ${
+                        contact.hasMemberReplyWaiting
+                          ? 'bg-emerald-500/20 text-emerald-300 font-bold'
+                          : 'text-[#33C1FF]'
+                      }`}
+                    >
+                      {contact.activeCoachCount}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          <div className="lg:col-span-8">
+            {activeChatContact && (
+              <CoachMessageThread
+                viewerRole="coach"
+                coach={activeCoach}
+                memberId={activeChatContact.threadMemberId}
+                memberName={activeChatContact.name}
+                messages={directMessages}
+                onSendMessage={onSendDirectMessage}
+                isCloudConnected={Boolean(authUser && isLiveAdmin)}
+                cloudStatusHint={
+                  authUser && isLiveAdmin
+                    ? `Conectado como ${authUser.email} · Recibiendo mensajes y audios reales de socios.`
+                    : authUser
+                      ? `Sesión ${authUser.email} sin permisos de Coach. Entra con ${primaryGymEmail} o autoriza este correo en Dirección.`
+                      : `Conecta ${primaryGymEmail} (o una cuenta Coach autorizada) para recibir y responder mensajes reales.`
+                }
+                onConnectGoogle={onSignInGoogle}
+                notificationPermission={notificationPermission}
+                onRequestNotificationPermission={onRequestNotificationPermission}
+                onTestNotification={onTestNotification}
+              />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* MAIN 2-COLUMN WORKSPACE: LEFT = 4-STEP BUILDER · RIGHT = LIVE CHATS + SUMMARY + SENT HISTORY */}
+      {portalSection === 'rutinas' && (
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* LEFT COLUMN (7 cols): STEPS 1 TO 4 */}
         <div className="xl:col-span-7 space-y-6">
           {/* PASO 1: BASE DE DATOS DE SOCIOS (SELECCIÓN EXCLUSIVA) */}
@@ -625,6 +948,7 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
                 </h3>
               </div>
               <span className="text-xs font-mono tabular-nums text-slate-400">
+                {realMembersCount > 0 ? `${realMembersCount} reales/alta · ` : ''}
                 {filteredDirectoryMembers.length} de {allDirectoryMembers.length} socios
               </span>
             </div>
@@ -650,7 +974,12 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
                   <button
                     key={member.id}
                     type="button"
-                    onClick={() => setSelectedRecipientId(member.id)}
+                    onClick={() => {
+                      setSelectedRecipientId(member.id);
+                      const matchedThreadId =
+                        authUser && member.uid === authUser.uid ? 'current-user' : member.uid;
+                      setSelectedChatThreadId(matchedThreadId);
+                    }}
                     aria-pressed={isSelected}
                     className={`min-h-[58px] p-3 rounded-xl border text-left transition-colors cursor-pointer flex items-center justify-between gap-2 ${
                       isSelected
@@ -659,7 +988,18 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
                     }`}
                   >
                     <div className="min-w-0">
-                      <p className="text-sm font-bold text-white truncate">{member.name}</p>
+                      <p className="text-sm font-bold text-white truncate flex items-center gap-1.5">
+                        <span className="truncate">{member.name}</span>
+                        {member.isCloud ? (
+                          <span className="text-[10px] font-mono text-emerald-300 shrink-0">
+                            · Nube
+                          </span>
+                        ) : member.isRealMember ? (
+                          <span className="text-[10px] font-mono text-[#33C1FF] shrink-0">
+                            · Alta
+                          </span>
+                        ) : null}
+                      </p>
                       <p className="text-xs text-slate-400 truncate font-mono tabular-nums">
                         {member.memberCode} · {member.tier} ·{' '}
                         {member.feeStatus === 'al-dia' ? 'Al día' : 'Cuota pendiente'}
@@ -1053,8 +1393,120 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
           </section>
         </div>
 
-        {/* RIGHT COLUMN (5 cols): LIVE ROUTINE SUMMARY + SEND CTA + SENT HISTORY */}
+        {/* RIGHT COLUMN (5 cols): LIVE CHATS WITH MEMBERS + ROUTINE SUMMARY + SENT HISTORY */}
         <div className="xl:col-span-5 space-y-6">
+          {/* EMBEDDED LIVE MEMBER CHATS & VOICE AUDIOS DIRECTLY INSIDE "ENVIAR RUTINA" */}
+          {onSendDirectMessage && activeChatContact && (
+            <section
+              aria-label="Chats y audios en directo con socios"
+              className="rounded-2xl bg-[#0D121B] border border-[#00A8FF]/35 p-4 space-y-3.5"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-[#33C1FF] flex items-center gap-1.5">
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    Chats y Audios en directo · Coach {activeCoach.name}
+                  </p>
+                  <h3 className="text-base font-bold text-white mt-0.5">
+                    Mensajes de Socios aquí mismo
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPortalSection('chat')}
+                  className="min-h-[32px] px-2.5 rounded-lg bg-[#06080D] hover:border-[#00A8FF] border border-white/12 text-[11px] font-semibold text-slate-200 hover:text-white cursor-pointer whitespace-nowrap"
+                >
+                  Pantalla completa
+                </button>
+              </div>
+
+              {/* Quick clickable inbox strip of members (sorted by newest incoming messages) */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                {chatContacts.slice(0, 8).map((contact) => {
+                  const isSelected = activeChatContact.threadMemberId === contact.threadMemberId;
+                  return (
+                    <button
+                      key={contact.threadMemberId}
+                      type="button"
+                      onClick={() =>
+                        handleSelectChatContact(contact.threadMemberId, contact.recipientMemberId)
+                      }
+                      aria-pressed={isSelected}
+                      className={`min-h-[36px] px-3 rounded-xl border text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
+                        isSelected
+                          ? 'bg-[#00A8FF] border-[#00A8FF] text-[#04070D]'
+                          : contact.hasMemberReplyWaiting
+                            ? 'bg-emerald-950/50 border-emerald-500/50 text-emerald-200 hover:border-emerald-400'
+                            : 'bg-[#06080D] border-white/12 text-slate-200 hover:border-[#00A8FF]/50'
+                      }`}
+                    >
+                      {contact.hasMemberReplyWaiting && !isSelected && (
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                      )}
+                      <span>{contact.name}</span>
+                      {(contact.activeCoachCount > 0 || contact.otherCoachCount > 0) && (
+                        <span
+                          className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-md ${
+                            isSelected
+                              ? 'bg-[#04070D]/20 text-[#04070D]'
+                              : 'bg-white/10 text-[#33C1FF]'
+                          }`}
+                        >
+                          {contact.activeCoachCount > 0
+                            ? contact.activeCoachCount
+                            : `${contact.otherCoachCount}*`}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Alert if this member wrote to the OTHER coach so no message is ever missed */}
+              {activeChatContact.otherCoachCount > 0 && activeChatContact.activeCoachCount === 0 && (
+                <div className="rounded-xl bg-amber-950/40 border border-amber-500/40 px-3 py-2 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    {activeChatContact.name} envió {activeChatContact.otherCoachCount}{' '}
+                    {activeChatContact.otherCoachCount === 1 ? 'mensaje' : 'mensajes'} al otro
+                    Coach.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const otherCoach = COACH_TEAM.find((c) => c.id !== activeCoach.id);
+                      if (otherCoach) onSelectCoach(otherCoach.id);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-amber-400 text-[#04070D] font-bold text-[11px] cursor-pointer"
+                  >
+                    Ver con el otro Coach
+                  </button>
+                </div>
+              )}
+
+              <CoachMessageThread
+                compact
+                viewerRole="coach"
+                coach={activeCoach}
+                memberId={activeChatContact.threadMemberId}
+                memberName={activeChatContact.name}
+                messages={directMessages}
+                onSendMessage={onSendDirectMessage}
+                isCloudConnected={Boolean(authUser && isLiveAdmin)}
+                cloudStatusHint={
+                  authUser && isLiveAdmin
+                    ? `En directo (${authUser.email}) · Lee, escucha audios y responde aquí mismo.`
+                    : authUser
+                      ? `Cuenta ${authUser.email} sin acceso Coach. Entra con ${primaryGymEmail}.`
+                      : `Conecta Google (${primaryGymEmail}) para recibir mensajes y audios reales.`
+                }
+                onConnectGoogle={onSignInGoogle}
+                notificationPermission={notificationPermission}
+                onRequestNotificationPermission={onRequestNotificationPermission}
+                onTestNotification={onTestNotification}
+              />
+            </section>
+          )}
+
           <section className="rounded-2xl bg-[#0D121B] border border-[#00A8FF]/35 p-4 sm:p-6 space-y-4">
             <div className="flex items-start justify-between gap-2">
               <div>
@@ -1206,7 +1658,8 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
             )}
 
             <button
-              type="submit"
+              type="button"
+              onClick={() => handleSubmitRoutine()}
               className="w-full min-h-[48px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
               <Send className="w-4 h-4" />
@@ -1293,7 +1746,8 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
             )}
           </section>
         </div>
-      </form>
+      </div>
+      )}
 
       {/* EXERCISE CONFIGURATOR MODAL (1-10 SERIES, FIXED REPS OR PYRAMID, WEIGHT/INTENSITY, REST) */}
       {configuringMachine && (

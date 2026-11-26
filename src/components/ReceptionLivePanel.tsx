@@ -8,14 +8,17 @@ import {
   ClipboardCheck,
   Copy,
   FileText,
+  KeyRound,
   LogIn,
   LogOut,
+  Mail,
   PlayCircle,
   Plus,
   QrCode,
   ShieldAlert,
   ShieldCheck,
   Smartphone,
+  Trash2,
   UserPlus,
   Wifi,
   X,
@@ -24,6 +27,11 @@ import { BOOTSTRAPPED_OWNER_EMAIL } from '../firebase';
 import type { CoachProfile, FeeStatus } from '../types/gym';
 import { buildTurnstileScannerUrl, resolveDirectPublicUrl } from '../utils/pwaUtils';
 import { buildMemberQrPayload } from '../utils/qrPass';
+import {
+  getStaffRoleLabel,
+  type AuthorizedStaffRecord,
+  type AuthorizedStaffRole,
+} from '../utils/staffAuth';
 import type { LiveAccessLog, LiveGymMember } from '../services/liveGymService';
 import type { PresentationKitTab } from './PresentationKitModal';
 import { RealQrCode } from './RealQrCode';
@@ -32,6 +40,15 @@ interface ReceptionLivePanelProps {
   activeCoach: CoachProfile;
   authUser: User | null;
   isLiveAdmin: boolean;
+  isSigningIn: boolean;
+  primaryGymEmail: string;
+  authorizedStaff: AuthorizedStaffRecord[];
+  onAddAuthorizedStaff: (input: {
+    email: string;
+    label: string;
+    role: AuthorizedStaffRole;
+  }) => Promise<{ savedToCloud: boolean; record: AuthorizedStaffRecord }>;
+  onRemoveAuthorizedStaff: (staffId: string) => Promise<void>;
   onSignInGoogle: () => Promise<void>;
   onSignOutGoogle: () => Promise<void>;
   liveMembers: LiveGymMember[];
@@ -45,7 +62,7 @@ interface ReceptionLivePanelProps {
     tier: 'Socio Fundador' | 'Socio Club';
     feeStatus: FeeStatus;
     assignedCoach: string;
-  }) => Promise<void>;
+  }) => Promise<{ savedToCloud: boolean; member: LiveGymMember }>;
   onOpenTurnstileScanner: () => void;
   onOpenPresentationKit?: (tab: PresentationKitTab) => void;
 }
@@ -92,6 +109,11 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
   activeCoach,
   authUser,
   isLiveAdmin,
+  isSigningIn,
+  primaryGymEmail,
+  authorizedStaff,
+  onAddAuthorizedStaff,
+  onRemoveAuthorizedStaff,
   onSignInGoogle,
   onSignOutGoogle,
   liveMembers,
@@ -113,6 +135,13 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
   const [previewQrMember, setPreviewQrMember] = useState<LiveGymMember | null>(null);
   const [checkedSteps, setCheckedSteps] = useState<Record<string, boolean>>({});
   const [busyMemberId, setBusyMemberId] = useState<string | null>(null);
+
+  // Authorized Gym & Coach Google Account Manager state
+  const [staffEmailInput, setStaffEmailInput] = useState('');
+  const [staffLabelInput, setStaffLabelInput] = useState('');
+  const [staffRoleInput, setStaffRoleInput] = useState<AuthorizedStaffRole>('gym-main');
+  const [savingStaff, setSavingStaff] = useState(false);
+  const [staffNotice, setStaffNotice] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
 
   const displayedMembers = isLiveAdmin ? liveMembers : localDemoMembers;
 
@@ -146,7 +175,7 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
     setCreating(true);
     setFormNotice(null);
     try {
-      await onCreateWalkInMember({
+      const result = await onCreateWalkInMember({
         name: newName.trim(),
         phone: newPhone.trim() || '600 000 000',
         email: newEmail.trim(),
@@ -155,15 +184,58 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
         assignedCoach: activeCoach.name,
       });
       setFormNotice(
-        `Cliente «${newName.trim()}» dado de alta (${
-          newFeeStatus === 'al-dia' ? 'Al día' : 'Cuota pendiente'
-        }). Ya puedes ver o escanear su Pase QR.`
+        result.savedToCloud
+          ? `Cliente «${newName.trim()}» guardado EN LA NUBE (${
+              newFeeStatus === 'al-dia' ? 'Al día' : 'Cuota pendiente'
+            }). Ya aparece automáticamente en el Portal de Coach Javi y en todos los dispositivos.`
+          : `Cliente «${newName.trim()}» guardado en este ordenador (Modo local). Ya aparece en el Portal de Coach Javi de este navegador. Conecta Google arriba para sincronizarlo también con otros móviles.`
       );
       setNewName('');
       setNewPhone('');
       setNewEmail('');
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleAddStaffAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setStaffNotice(null);
+    if (!staffEmailInput.trim()) {
+      setStaffNotice({
+        tone: 'err',
+        text: 'Escribe el correo de Google que quieres autorizar (ej. fitnessdream@gmail.com).',
+      });
+      return;
+    }
+    setSavingStaff(true);
+    try {
+      const res = await onAddAuthorizedStaff({
+        email: staffEmailInput.trim(),
+        label:
+          staffLabelInput.trim() ||
+          (staffRoleInput === 'gym-main'
+            ? 'Correo oficial Gimnasio FitnessDreams'
+            : staffRoleInput === 'coach'
+              ? 'Coach FitnessDreams'
+              : 'Cuenta autorizada'),
+        role: staffRoleInput,
+      });
+      setStaffNotice({
+        tone: 'ok',
+        text: res.savedToCloud
+          ? `Cuenta «${res.record.email}» autorizada EN LA NUBE. Desde ahora puede iniciar sesión con Google en el PC de recepción y en el Portal Coaches con acceso total.`
+          : `Cuenta «${res.record.email}» preparada en modo local. Inicia sesión primero con ${BOOTSTRAPPED_OWNER_EMAIL} para activarla en la nube para todos los dispositivos.`,
+      });
+      setStaffEmailInput('');
+      setStaffLabelInput('');
+    } catch (err) {
+      setStaffNotice({
+        tone: 'err',
+        text: err instanceof Error ? err.message : 'No se pudo guardar el correo.',
+      });
+    } finally {
+      setSavingStaff(false);
     }
   };
 
@@ -183,40 +255,58 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
       <div
         className={`rounded-2xl p-5 border flex flex-col lg:flex-row lg:items-center justify-between gap-4 ${
           isLiveAdmin
-            ? 'bg-emerald-950/25 border-emerald-500/35'
-            : 'bg-[#0D121B] border-[#00A8FF]/45'
+            ? 'bg-emerald-950/30 border-emerald-500/45'
+            : authUser
+              ? 'bg-amber-950/25 border-amber-500/45'
+              : 'bg-[#0D121B] border-[#00A8FF]/45'
         }`}
       >
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <Wifi
-              className={`w-4 h-4 ${isLiveAdmin ? 'text-emerald-400' : 'text-[#33C1FF]'}`}
+              className={`w-4 h-4 ${
+                isLiveAdmin
+                  ? 'text-emerald-400'
+                  : authUser
+                    ? 'text-amber-400'
+                    : 'text-[#33C1FF]'
+              }`}
             />
-            <span className="text-xs font-bold uppercase tracking-wider text-[#33C1FF]">
+            <span
+              className={`text-xs font-bold uppercase tracking-wider ${
+                isLiveAdmin
+                  ? 'text-emerald-300'
+                  : authUser
+                    ? 'text-amber-300'
+                    : 'text-[#33C1FF]'
+              }`}
+            >
               {isLiveAdmin
-                ? 'Sincronización en tiempo real ACTIVA (Firebase Cloud)'
-                : 'Activar modo gimnasio real (Ordenador + Móvil Lector + Clientes)'}
+                ? `CONECTADO EN LA NUBE · ${liveMembers.length} socios reales sincronizados`
+                : authUser
+                  ? 'CONECTADO COMO SOCIO (Sin permisos de dirección / coach)'
+                  : 'SIN CONECTAR A GOOGLE · Modo local en este ordenador'}
             </span>
           </div>
           <p className="text-sm text-slate-200 leading-relaxed">
             {isLiveAdmin ? (
               <>
-                Conectado como <strong className="text-white">{authUser?.email}</strong>. Todo
-                cambio de cuota en este ordenador actualiza al instante el Pase QR del socio y el
-                móvil lector de la entrada.
+                Sesión activa con <strong className="text-white">{authUser?.email}</strong>. Todo
+                alta de cliente, rutina de Coach Javi o cambio de cuota se sincroniza al instante en
+                todos los dispositivos.
               </>
             ) : authUser ? (
               <>
-                Conectado como <strong className="text-white">{authUser.email}</strong> (cuenta de
-                socio). Para controlar el ordenador de recepción y el torno, inicia sesión con{' '}
-                <span className="font-mono text-[#33C1FF]">{BOOTSTRAPPED_OWNER_EMAIL}</span>.
+                Estás conectado como <strong className="text-white">{authUser.email}</strong> (cuenta
+                de socio). Para gestionar el gimnasio o ver los socios reales en Javi, cambia a{' '}
+                <span className="font-mono text-[#33C1FF]">{primaryGymEmail}</span> o añade tu correo
+                abajo en «Cuenta Google del Gimnasio».
               </>
             ) : (
               <>
-                Inicia sesión con tu cuenta de Google del gimnasio (
-                <span className="font-mono text-[#33C1FF]">{BOOTSTRAPPED_OWNER_EMAIL}</span>) para
-                guardar clientes reales, bloquear/desbloquear cuotas en 1 clic y leer sus QR con un
-                móvil secundario.
+                Inicia sesión con la cuenta Google autorizada del gimnasio (
+                <span className="font-mono text-[#33C1FF]">{primaryGymEmail}</span>) para guardar
+                socios en la nube y verlos desde el Portal Coaches y el móvil lector.
               </>
             )}
           </p>
@@ -235,11 +325,12 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
           ) : (
             <button
               type="button"
+              disabled={isSigningIn}
               onClick={() => void onSignInGoogle()}
-              className="min-h-[44px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center gap-2 cursor-pointer"
+              className="min-h-[44px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] disabled:opacity-60 text-[#04070D] text-xs font-bold flex items-center gap-2 cursor-pointer"
             >
               <LogIn className="w-4 h-4" />
-              Conectar Google del Gimnasio
+              {isSigningIn ? 'Conectando con Google...' : 'Conectar Google del Gimnasio'}
             </button>
           )}
           <button
@@ -250,6 +341,124 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
             <Camera className="w-4 h-4" />
             Abrir Lector QR Torno
           </button>
+        </div>
+      </div>
+
+      {/* 1A. Authorized Gym & Coach Google Emails Manager (Switch from personal email to FitnessDreams gym email anytime) */}
+      <div className="rounded-2xl bg-[#0D121B] border border-white/10 p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="space-y-0.5">
+            <p className="text-xs font-bold text-[#33C1FF] flex items-center gap-1.5">
+              <KeyRound className="w-3.5 h-3.5" />
+              Cuenta Google del Gimnasio y Coaches Autorizados
+            </p>
+            <h3 className="text-base font-bold text-white">
+              Cambia al correo oficial de FitnessDreams o añade a tus coaches cuando quieras
+            </h3>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Ahora mismo está autorizada tu cuenta{' '}
+              <span className="font-mono text-slate-200">{BOOTSTRAPPED_OWNER_EMAIL}</span>. Cuando
+              tengas el correo oficial del gimnasio (ej.{' '}
+              <span className="font-mono text-[#33C1FF]">fitnessdream...@gmail.com</span>) o quieras
+              que Javi y Joel entren con su Gmail propio, añádelo aquí abajo.
+            </p>
+          </div>
+          <span className="text-xs font-mono text-emerald-300 shrink-0">
+            {authorizedStaff.length} {authorizedStaff.length === 1 ? 'cuenta activa' : 'cuentas activas'}
+          </span>
+        </div>
+
+        <form
+          onSubmit={(e) => void handleAddStaffAccount(e)}
+          className="rounded-xl bg-[#06080D] border border-white/10 p-3.5 space-y-3"
+        >
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5">
+            <div className="md:col-span-5 relative">
+              <Mail className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="email"
+                value={staffEmailInput}
+                onChange={(e) => setStaffEmailInput(e.target.value)}
+                placeholder="Nuevo correo Google (ej. fitnessdream@gmail.com)"
+                aria-label="Correo Google oficial del gimnasio o coach"
+                className="w-full min-h-[40px] rounded-lg bg-[#0D121B] border border-white/12 pl-9 pr-3 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00A8FF]"
+              />
+            </div>
+            <input
+              type="text"
+              value={staffLabelInput}
+              onChange={(e) => setStaffLabelInput(e.target.value)}
+              placeholder="Etiqueta (ej. Gimnasio FitnessDreams o Coach Javi)"
+              aria-label="Nombre o etiqueta de la cuenta autorizada"
+              className="md:col-span-3 min-h-[40px] rounded-lg bg-[#0D121B] border border-white/12 px-3 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00A8FF]"
+            />
+            <select
+              value={staffRoleInput}
+              onChange={(e) => setStaffRoleInput(e.target.value as AuthorizedStaffRole)}
+              aria-label="Rol de la cuenta autorizada"
+              className="md:col-span-2 min-h-[40px] rounded-lg bg-[#0D121B] border border-white/12 px-2.5 text-xs text-white focus:outline-none focus:border-[#00A8FF]"
+            >
+              <option value="gym-main">Correo oficial gimnasio</option>
+              <option value="coach">Coach / Entrenador</option>
+              <option value="owner">Dirección</option>
+              <option value="scanner">Lector QR Torno</option>
+            </select>
+            <button
+              type="submit"
+              disabled={savingStaff}
+              className="md:col-span-2 min-h-[40px] px-3 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] disabled:opacity-50 text-[#04070D] text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              {savingStaff ? 'Guardando...' : 'Autorizar'}
+            </button>
+          </div>
+          {staffNotice && (
+            <p
+              role="status"
+              className={`text-xs font-medium ${
+                staffNotice.tone === 'ok' ? 'text-emerald-300' : 'text-red-300'
+              }`}
+            >
+              {staffNotice.text}
+            </p>
+          )}
+        </form>
+
+        <div className="divide-y divide-white/8 border-t border-white/8">
+          {authorizedStaff.map((staff) => (
+            <div
+              key={staff.staffId}
+              className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+            >
+              <div className="min-w-0">
+                <p className="font-semibold text-white flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-[#33C1FF]">{staff.email}</span>
+                  <span className="text-[11px] text-slate-300">· {getStaffRoleLabel(staff.role)}</span>
+                  {staff.isCloudSynced ? (
+                    <span className="text-[11px] font-semibold text-emerald-400">· Activa en nube</span>
+                  ) : (
+                    <span className="text-[11px] font-semibold text-amber-300">
+                      · Pendiente de conectar Google
+                    </span>
+                  )}
+                </p>
+                <p className="text-[11px] text-slate-400">{staff.label}</p>
+              </div>
+              {!staff.isBootstrappedOwner ? (
+                <button
+                  type="button"
+                  onClick={() => void onRemoveAuthorizedStaff(staff.staffId)}
+                  aria-label={`Quitar permiso a ${staff.email}`}
+                  className="min-h-[34px] px-2.5 rounded-lg bg-red-600/15 hover:bg-red-600/30 border border-red-500/35 text-red-300 text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Quitar
+                </button>
+              ) : (
+                <span className="text-[11px] text-slate-500 font-mono">Cuenta respaldo</span>
+              )}
+            </div>
+          ))}
         </div>
       </div>
 

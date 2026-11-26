@@ -27,8 +27,19 @@ service cloud.firestore {
       return isVerified() && request.auth.token.email == 'joseundergroundbnd@gmail.com';
     }
 
+    function callerEmailStaffId() {
+      return request.auth.token.email.lower().replace('[^a-z0-9]', '_');
+    }
+
+    function isAuthorizedStaffEmail() {
+      return isVerified()
+        && request.auth.token.email is string
+        && exists(/databases/$(database)/documents/authorizedStaff/$(callerEmailStaffId()));
+    }
+
     function isAdmin() {
       return isBootstrappedAdmin()
+        || isAuthorizedStaffEmail()
         || (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
     }
 
@@ -54,6 +65,20 @@ service cloud.firestore {
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
         && data.role in ['owner', 'coach', 'scanner']
         && data.createdAt is timestamp;
+    }
+
+    function isValidAuthorizedStaffEmail(data) {
+      return data.keys().hasAll(['staffId', 'email', 'label', 'role', 'addedByUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['staffId', 'email', 'label', 'role', 'addedByUid', 'createdAt', 'updatedAt'])
+        && isValidId(data.staffId)
+        && data.staffId.size() >= 3
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 160
+        && data.email.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$')
+        && data.label is string && data.label.size() >= 1 && data.label.size() <= 80
+        && data.role in ['gym-main', 'owner', 'coach', 'scanner']
+        && isValidId(data.addedByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
     }
 
     function isValidGymMember(data) {
@@ -275,7 +300,7 @@ service cloud.firestore {
     // ---------------------------------------------------------
     match /admins/{adminUid} {
       allow get: if isValidId(adminUid) && (isOwner(adminUid) || isAdmin());
-      allow list: if isBootstrappedAdmin();
+      allow list: if isAdmin();
       allow create: if isValidId(adminUid)
         && isValidAdminUser(incoming())
         && incoming().uid == adminUid
@@ -291,11 +316,41 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------
+    // 1B. Authorized Gym & Coach Google Emails (/authorizedStaff/{staffId})
+    // ---------------------------------------------------------
+    match /authorizedStaff/{staffId} {
+      allow get: if isValidId(staffId) && (
+        isAdmin() || (isVerified() && request.auth.token.email is string && callerEmailStaffId() == staffId)
+      );
+      allow list: if isAdmin();
+      allow create: if isValidId(staffId)
+        && isVerified()
+        && isValidAuthorizedStaffEmail(incoming())
+        && incoming().staffId == staffId
+        && incoming().email.lower().replace('[^a-z0-9]', '_') == staffId
+        && incoming().addedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isAdmin();
+      allow update: if isValidId(staffId)
+        && isVerified()
+        && isValidAuthorizedStaffEmail(incoming())
+        && incoming().staffId == existing().staffId
+        && incoming().email == existing().email
+        && incoming().addedByUid == existing().addedByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['label', 'role', 'updatedAt'])
+        && isAdmin();
+      allow delete: if isValidId(staffId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
     // 2. Real Gym Members (/members/{memberId}) + PII Split
     // ---------------------------------------------------------
     match /members/{memberId} {
       allow get: if isValidId(memberId) && (isOwner(memberId) || isAdmin());
-      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+      allow list: if isAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
 
       allow create: if isValidId(memberId)
         && isVerified()
@@ -378,7 +433,7 @@ service cloud.firestore {
     // ---------------------------------------------------------
     match /accessLogs/{logId} {
       allow get: if isValidId(logId) && (isAdmin() || (isSignedIn() && existing().memberUid == request.auth.uid));
-      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().memberUid == request.auth.uid);
+      allow list: if isAdmin() || (isSignedIn() && existing().memberUid == request.auth.uid);
       allow create: if isValidId(logId)
         && isVerified()
         && isValidAccessLog(incoming())
@@ -396,7 +451,7 @@ service cloud.firestore {
       allow get: if isValidId(routineId) && (
         isAdmin() || (isSignedIn() && (existing().targetMemberId == 'all' || existing().targetMemberId == request.auth.uid))
       );
-      allow list: if isBootstrappedAdmin() || (
+      allow list: if isAdmin() || (
         isSignedIn() && (existing().targetMemberId == 'all' || existing().targetMemberId == request.auth.uid)
       );
       allow create: if isValidId(routineId)
@@ -429,7 +484,7 @@ service cloud.firestore {
     // ---------------------------------------------------------
     match /directMessages/{messageId} {
       allow get: if isValidId(messageId) && (isAdmin() || (isSignedIn() && existing().memberId == request.auth.uid));
-      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().memberId == request.auth.uid);
+      allow list: if isAdmin() || (isSignedIn() && existing().memberId == request.auth.uid);
       allow create: if isValidId(messageId)
         && isVerified()
         && isValidLiveDirectMessage(incoming())

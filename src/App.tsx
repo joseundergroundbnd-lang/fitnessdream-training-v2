@@ -1,6 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
+  Bell,
+  BellOff,
   CalendarCheck,
   Camera,
   Dumbbell,
@@ -18,6 +20,7 @@ import { AdminDashboardView } from './components/AdminDashboardView';
 import { BrandLogo } from './components/BrandLogo';
 import { ClassesView } from './components/ClassesView';
 import { ClubView } from './components/ClubView';
+import type { SendDirectMessageResult } from './components/CoachMessageThread';
 import { CoachRoutineBuilder } from './components/CoachRoutineBuilder';
 import { GymMapView } from './components/GymMapView';
 import { HomeView } from './components/HomeView';
@@ -29,14 +32,23 @@ import { PWAEntryManager, PWAInstallButton } from './components/PWAInstallPrompt
 import { RegistrationView } from './components/RegistrationView';
 import { TurnstileScannerView } from './components/TurnstileScannerView';
 import { WorkoutView } from './components/WorkoutView';
-import { auth, signInWithGoogleAccount, signOutGoogleAccount } from './firebase';
 import {
+  BOOTSTRAPPED_OWNER_EMAIL,
+  auth,
+  completeGoogleRedirectSignIn,
+  signInWithGoogleAccount,
+  signOutGoogleAccount,
+} from './firebase';
+import {
+  addAuthorizedStaffEmail,
   checkIsLiveAdmin,
   createWalkInPilotMember,
   publishLiveRoutine,
+  removeAuthorizedStaffEmail,
   sendLiveMessage,
   setLiveMemberFeeStatus,
   subscribeAllLiveMembers,
+  subscribeAuthorizedStaff,
   subscribeLiveAccessLogs,
   subscribeLiveMemberSelf,
   subscribeLiveMessages,
@@ -48,6 +60,25 @@ import {
   type LiveGymMember,
 } from './services/liveGymService';
 import { generateMemberCodeFromUid, sanitizeMemberCode } from './utils/qrPass';
+import {
+  emailToStaffDocId,
+  isValidStaffEmail,
+  normalizeStaffEmail,
+  resolvePrimaryGymEmail,
+  type AuthorizedStaffRecord,
+  type AuthorizedStaffRole,
+} from './utils/staffAuth';
+import {
+  formatIncomingMessageNotification,
+  formatIncomingRoutineNotification,
+  getNotificationPermissionState,
+  playNotificationChime,
+  requestGymNotificationPermission,
+  shouldNotifyIncomingMessage,
+  showGymNotification,
+  vibrateIncomingAlert,
+  type NotificationPermissionState,
+} from './utils/notifications';
 import {
   COACH_TEAM,
   INITIAL_ACTIVE_WORKOUT,
@@ -122,6 +153,8 @@ interface PersistedState {
   clubFriends: ClubFriendProfile[];
   peerChallenges: PeerWorkoutChallenge[];
   sharedWorkouts: SharedWorkoutPost[];
+  walkInMembers: LiveGymMember[];
+  localAuthorizedStaff: AuthorizedStaffRecord[];
 }
 
 function getInitialWorkspaceMode(): AppWorkspaceMode {
@@ -178,6 +211,8 @@ function loadInitialState(): PersistedState {
     clubFriends: INITIAL_CLUB_FRIENDS,
     peerChallenges: INITIAL_PEER_CHALLENGES,
     sharedWorkouts: INITIAL_SHARED_WORKOUTS,
+    walkInMembers: [],
+    localAuthorizedStaff: [],
   };
 
   try {
@@ -209,6 +244,10 @@ function loadInitialState(): PersistedState {
       clubFriends: parsed.clubFriends ?? defaults.clubFriends,
       peerChallenges: parsed.peerChallenges ?? defaults.peerChallenges,
       sharedWorkouts: parsed.sharedWorkouts ?? defaults.sharedWorkouts,
+      walkInMembers: Array.isArray(parsed.walkInMembers) ? parsed.walkInMembers : [],
+      localAuthorizedStaff: Array.isArray(parsed.localAuthorizedStaff)
+        ? parsed.localAuthorizedStaff
+        : [],
     };
   } catch {
     return defaults;
@@ -233,15 +272,44 @@ export default function App() {
 
   // Firebase Auth & Real-Time Cloud Pilot State
   const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [isSigningIn, setIsSigningIn] = useState(false);
   const [isLiveAdmin, setIsLiveAdmin] = useState(false);
   const [liveMembers, setLiveMembers] = useState<LiveGymMember[]>([]);
   const [liveAccessLogs, setLiveAccessLogs] = useState<LiveAccessLog[]>([]);
   const [liveRoutines, setLiveRoutines] = useState<LiveCoachRoutineDoc[]>([]);
   const [liveMessages, setLiveMessages] = useState<LiveDirectMessageDoc[]>([]);
+  const [liveAuthorizedStaff, setLiveAuthorizedStaff] = useState<AuthorizedStaffRecord[]>([]);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<{
+    tone: 'success' | 'warning' | 'info';
+    message: string;
+  } | null>(null);
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermissionState>(getNotificationPermissionState);
+  const [incomingAlert, setIncomingAlert] = useState<{
+    id: string;
+    title: string;
+    body: string;
+    actionLabel: string;
+    target: 'socio-chat' | 'socio-rutinas' | 'coach-chat';
+    coachId?: string;
+  } | null>(null);
+  const [requestedWorkoutSubtab, setRequestedWorkoutSubtab] = useState<
+    'activo' | 'coach' | 'mensajes' | 'catalogo' | null
+  >(null);
+  const workspaceModeRef = useRef<AppWorkspaceMode>(workspaceMode);
+  const seenLiveMsgIdsRef = useRef<Set<string>>(new Set());
+  const messagesHydratedRef = useRef<boolean>(false);
+  const seenLiveRoutineIdsRef = useRef<Set<string>>(new Set());
+  const routinesHydratedRef = useRef<boolean>(false);
   const [localDemoFeeOverrides, setLocalDemoFeeOverrides] = useState<Record<string, FeeStatus>>(
     () => (INITIAL_CLUB_MEMBERS[0] ? { [INITIAL_CLUB_MEMBERS[0].id]: 'pendiente' } : {})
   );
-  const [localWalkInMembers, setLocalWalkInMembers] = useState<LiveGymMember[]>([]);
+
+  useEffect(() => {
+    workspaceModeRef.current = workspaceMode;
+  }, [workspaceMode]);
 
   useEffect(() => {
     try {
@@ -251,18 +319,78 @@ export default function App() {
     }
   }, [state]);
 
-  // Listen to Firebase Auth state
+  // Sync walk-in members, routines & messages instantly across tabs on the same PC (e.g., Dirección tab <-> Coach Javi tab)
   useEffect(() => {
+    const handleStorageSync = (event: StorageEvent) => {
+      if (event.key !== STORAGE_KEY || !event.newValue) return;
+      try {
+        const incoming = JSON.parse(event.newValue) as Partial<PersistedState>;
+        setState((prev) => ({
+          ...prev,
+          walkInMembers: Array.isArray(incoming.walkInMembers)
+            ? incoming.walkInMembers
+            : prev.walkInMembers,
+          localAuthorizedStaff: Array.isArray(incoming.localAuthorizedStaff)
+            ? incoming.localAuthorizedStaff
+            : prev.localAuthorizedStaff,
+          coachRoutines: Array.isArray(incoming.coachRoutines)
+            ? incoming.coachRoutines
+            : prev.coachRoutines,
+          directMessages: Array.isArray(incoming.directMessages)
+            ? incoming.directMessages
+            : prev.directMessages,
+        }));
+      } catch {
+        // Ignore malformed external storage payloads
+      }
+    };
+    window.addEventListener('storage', handleStorageSync);
+    return () => window.removeEventListener('storage', handleStorageSync);
+  }, []);
+
+  // Listen to Firebase Auth state & finish mobile redirect login if returning from Google
+  useEffect(() => {
+    void completeGoogleRedirectSignIn().then(async (redirectUser) => {
+      if (!redirectUser) return;
+      try {
+        const synced = await upsertSignedInMemberProfile(redirectUser, {
+          name: redirectUser.displayName || 'Socio FitnessDreams',
+          email: redirectUser.email || '',
+          phone: '',
+          goal: 'Hipertrofia y Fuerza',
+          tier: 'Socio Fundador',
+        });
+        setState((prev) => ({
+          ...prev,
+          profile: {
+            ...prev.profile,
+            memberId: synced.id,
+            name: prev.profile.isRegistered ? prev.profile.name : synced.name,
+            email: redirectUser.email || prev.profile.email,
+            founderNumber: synced.memberCode,
+            feeStatus: synced.feeStatus,
+            tier: synced.tier,
+            monthlyFee: synced.monthlyFee,
+          },
+        }));
+      } catch {
+        // Handled by auth state listener
+      }
+    });
+
     const unsub = onAuthStateChanged(auth, (user) => {
       setAuthUser(user);
+      setAuthReady(true);
       if (!user) {
         setIsLiveAdmin(false);
         setLiveMembers([]);
         setLiveAccessLogs([]);
         setLiveRoutines([]);
         setLiveMessages([]);
+        setLiveAuthorizedStaff([]);
         return;
       }
+      setAuthError(null);
       void checkIsLiveAdmin(user).then((adminFlag) => {
         setIsLiveAdmin(adminFlag);
       });
@@ -297,14 +425,92 @@ export default function App() {
       })
     );
 
-    // 2. Live routines & direct messages
-    unsubs.push(subscribeLiveRoutines(isLiveAdmin, authUser.uid, setLiveRoutines));
-    unsubs.push(subscribeLiveMessages(isLiveAdmin, authUser.uid, setLiveMessages));
+    // Reset hydration markers on account/role switch so historical messages never spam alerts
+    messagesHydratedRef.current = false;
+    seenLiveMsgIdsRef.current = new Set();
+    routinesHydratedRef.current = false;
+    seenLiveRoutineIdsRef.current = new Set();
+
+    // 2. Live routines & direct messages (with real-time incoming notification triggers)
+    unsubs.push(
+      subscribeLiveRoutines(isLiveAdmin, authUser.uid, (routines) => {
+        setLiveRoutines(routines);
+        if (!routinesHydratedRef.current) {
+          routines.forEach((r) => seenLiveRoutineIdsRef.current.add(r.id));
+          routinesHydratedRef.current = true;
+          return;
+        }
+        const newlyArrived = routines.filter((r) => !seenLiveRoutineIdsRef.current.has(r.id));
+        newlyArrived.forEach((r) => seenLiveRoutineIdsRef.current.add(r.id));
+        if (workspaceModeRef.current === 'socio' && newlyArrived.length > 0) {
+          const latest = newlyArrived[0];
+          if (latest.createdByUid !== authUser.uid) {
+            const payload = formatIncomingRoutineNotification(latest);
+            setIncomingAlert({
+              id: latest.id,
+              title: payload.title,
+              body: payload.body,
+              actionLabel: 'Ver rutina',
+              target: 'socio-rutinas',
+              coachId: latest.coachId,
+            });
+            playNotificationChime();
+            vibrateIncomingAlert();
+            void showGymNotification(payload);
+          }
+        }
+      })
+    );
+    unsubs.push(
+      subscribeLiveMessages(
+        isLiveAdmin,
+        authUser.uid,
+        (messages) => {
+          setLiveMessages(messages);
+          if (!messagesHydratedRef.current) {
+            messages.forEach((m) => seenLiveMsgIdsRef.current.add(m.id));
+            messagesHydratedRef.current = true;
+            return;
+          }
+          const notifyCandidates = messages.filter((m) =>
+            shouldNotifyIncomingMessage({
+              viewerMode: workspaceModeRef.current,
+              message: m,
+              currentUid: authUser.uid,
+              seenIds: seenLiveMsgIdsRef.current,
+            })
+          );
+          messages.forEach((m) => seenLiveMsgIdsRef.current.add(m.id));
+          if (notifyCandidates.length > 0) {
+            const latest = notifyCandidates[notifyCandidates.length - 1];
+            const payload = formatIncomingMessageNotification(latest);
+            setIncomingAlert({
+              id: latest.id,
+              title: payload.title,
+              body: payload.body,
+              actionLabel: 'Abrir chat',
+              target: workspaceModeRef.current === 'socio' ? 'socio-chat' : 'coach-chat',
+              coachId: latest.coachId,
+            });
+            playNotificationChime();
+            vibrateIncomingAlert();
+            void showGymNotification(payload);
+          }
+        },
+        (msgErr) => {
+          setAuthNotice({
+            tone: 'warning',
+            message: `Aviso de sincronización de mensajes: ${msgErr}`,
+          });
+        }
+      )
+    );
     unsubs.push(subscribeLiveAccessLogs(isLiveAdmin, authUser.uid, setLiveAccessLogs));
 
-    // 3. Admin-only real members directory
+    // 3. Admin-only real members directory & authorized gym/coach accounts
     if (isLiveAdmin) {
       unsubs.push(subscribeAllLiveMembers(setLiveMembers));
+      unsubs.push(subscribeAuthorizedStaff(setLiveAuthorizedStaff));
     }
 
     return () => {
@@ -352,8 +558,41 @@ export default function App() {
       isRealMember: false,
     }));
 
-    return [...localWalkInMembers, selfMember, ...seeded];
-  }, [localDemoFeeOverrides, localWalkInMembers, state.clubMembers, state.profile]);
+    return [...state.walkInMembers, selfMember, ...seeded];
+  }, [localDemoFeeOverrides, state.clubMembers, state.profile, state.walkInMembers]);
+
+  // Unified list of authorized gym & coach Google accounts (Bootstrapped owner + Firestore cloud + local fallback)
+  const mergedAuthorizedStaff = useMemo<AuthorizedStaffRecord[]>(() => {
+    const map = new Map<string, AuthorizedStaffRecord>();
+    const ownerId = emailToStaffDocId(BOOTSTRAPPED_OWNER_EMAIL);
+    map.set(ownerId, {
+      staffId: ownerId,
+      email: BOOTSTRAPPED_OWNER_EMAIL,
+      label: 'Propietario fundador (respaldo permanente)',
+      role: 'owner',
+      addedByUid: 'bootstrap',
+      isBootstrappedOwner: true,
+      isCloudSynced: true,
+    });
+    for (const item of state.localAuthorizedStaff) {
+      if (!map.has(item.staffId)) {
+        map.set(item.staffId, item);
+      }
+    }
+    for (const item of liveAuthorizedStaff) {
+      map.set(item.staffId, {
+        ...item,
+        isBootstrappedOwner: item.staffId === ownerId,
+        isCloudSynced: true,
+      });
+    }
+    return Array.from(map.values());
+  }, [liveAuthorizedStaff, state.localAuthorizedStaff]);
+
+  const primaryGymEmail = useMemo(
+    () => resolvePrimaryGymEmail(mergedAuthorizedStaff, BOOTSTRAPPED_OWNER_EMAIL),
+    [mergedAuthorizedStaff]
+  );
 
   // Merge live Firestore routines with local seed items (preserving full exercises, pyramids, cardio & exclusive recipient)
   const mergedCoachRoutines = useMemo<CoachRoutine[]>(() => {
@@ -437,15 +676,74 @@ export default function App() {
       text: lm.text,
       audioUrl: lm.audioDataUrl,
       audioDurationSec: lm.audioDurationSec,
+      audioLabel: lm.kind === 'audio' ? lm.text : undefined,
       timestampLabel: lm.timestampLabel,
     }));
     const liveIds = new Set(mappedLive.map((m) => m.id));
     return [...state.directMessages.filter((m) => !liveIds.has(m.id)), ...mappedLive];
   }, [authUser, liveMessages, state.directMessages]);
 
+  const handleRequestNotificationPermission = async () => {
+    const nextPerm = await requestGymNotificationPermission();
+    setNotificationPermission(nextPerm);
+    if (nextPerm === 'granted') {
+      playNotificationChime();
+      vibrateIncomingAlert();
+      await showGymNotification({
+        title: 'Notificaciones activadas · FitnessDreams',
+        body:
+          workspaceMode === 'socio'
+            ? 'Te avisaremos al instante cuando tu Coach te envíe mensajes, audios o rutinas.'
+            : 'Te avisaremos al instante cuando un socio te envíe un mensaje o nota de voz.',
+        tag: 'fd-permission-granted',
+      });
+      setAuthNotice({
+        tone: 'success',
+        message:
+          'Notificaciones activadas. A partir de ahora recibirás avisos al instante cuando entren nuevos mensajes o audios.',
+      });
+    } else if (nextPerm === 'denied') {
+      setAuthNotice({
+        tone: 'warning',
+        message:
+          'Has bloqueado las notificaciones en el navegador. Puedes activarlas desde el icono de candado junto a la dirección web o en los ajustes del móvil.',
+      });
+    }
+  };
+
+  const handleTestNotification = async () => {
+    playNotificationChime();
+    vibrateIncomingAlert();
+    const sent = await showGymNotification({
+      title: 'Prueba de aviso · FitnessDreams Benidorm',
+      body:
+        workspaceMode === 'socio'
+          ? 'Así te avisaremos cuando Coach Javi o Joel te envíen un mensaje, audio o rutina.'
+          : 'Así te avisaremos cuando un socio te envíe un mensaje o nota de voz.',
+      tag: `fd-test-${Date.now()}`,
+    });
+    setAuthNotice({
+      tone: sent ? 'success' : 'warning',
+      message: sent
+        ? 'Notificación de prueba enviada. Si no la ves en pantalla, revisa que el modo No Molestar no esté activado.'
+        : 'Permite primero las notificaciones en tu navegador para ver avisos del sistema.',
+    });
+  };
+
   const handleSignInGoogle = async () => {
+    if (isSigningIn) return;
+    setIsSigningIn(true);
+    setAuthError(null);
+    setAuthNotice(null);
     try {
       const user = await signInWithGoogleAccount();
+      if (!user) {
+        setAuthNotice({
+          tone: 'info',
+          message: 'Redirigiendo a Google para iniciar sesión...',
+        });
+        return;
+      }
       setAuthUser(user);
       const adminFlag = await checkIsLiveAdmin(user);
       setIsLiveAdmin(adminFlag);
@@ -471,13 +769,100 @@ export default function App() {
           monthlyFee: synced.monthlyFee,
         },
       }));
-    } catch {
-      // Popup closed by user
+      if (adminFlag) {
+        setAuthNotice({
+          tone: 'success',
+          message: `Conectado con Google como ${user.email}. Acceso total de Dirección y Coaches ACTIVO en la nube.`,
+        });
+      } else {
+        setAuthNotice({
+          tone: 'warning',
+          message: `Conectado con Google como ${user.email} (cuenta de socio). Para ver la base de datos completa de coaches/dirección, inicia sesión con ${primaryGymEmail} o autoriza este correo en Dirección → Cuentas Google del Gimnasio.`,
+        });
+      }
+    } catch (err) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code)
+          : '';
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        setAuthNotice({
+          tone: 'info',
+          message: 'Has cerrado la ventana de Google antes de terminar el inicio de sesión.',
+        });
+        return;
+      }
+      if (code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : 'tu dominio';
+        setAuthError(
+          `El dominio «${host}» aún no está autorizado en Firebase Authentication. Añádelo en Firebase Console → Authentication → Settings → Dominios autorizados.`
+        );
+        return;
+      }
+      setAuthError(
+        `No se pudo iniciar sesión con Google (${code || 'error de red'}). Ábrelo desde Chrome o Safari directamente (no dentro de WhatsApp).`
+      );
+    } finally {
+      setIsSigningIn(false);
     }
   };
 
   const handleSignOutGoogle = async () => {
+    setAuthError(null);
     await signOutGoogleAccount();
+    setAuthNotice({
+      tone: 'info',
+      message: 'Sesión de Google cerrada. Ahora puedes entrar con otra cuenta.',
+    });
+  };
+
+  const handleAddAuthorizedStaff = async (input: {
+    email: string;
+    label: string;
+    role: AuthorizedStaffRole;
+  }): Promise<{ savedToCloud: boolean; record: AuthorizedStaffRecord }> => {
+    const cleanEmail = normalizeStaffEmail(input.email);
+    if (!isValidStaffEmail(cleanEmail)) {
+      throw new Error('Escribe un correo de Google válido (ej. fitnessdream@gmail.com).');
+    }
+    if (isLiveAdmin && authUser) {
+      const record = await addAuthorizedStaffEmail({
+        email: cleanEmail,
+        label: input.label.trim() || 'Cuenta del Gimnasio',
+        role: input.role,
+        addedByUid: authUser.uid,
+      });
+      return { savedToCloud: true, record };
+    }
+    const staffId = emailToStaffDocId(cleanEmail);
+    const localRecord: AuthorizedStaffRecord = {
+      staffId,
+      email: cleanEmail,
+      label: input.label.trim() || 'Cuenta del Gimnasio',
+      role: input.role,
+      addedByUid: 'local',
+      isCloudSynced: false,
+    };
+    setState((prev) => ({
+      ...prev,
+      localAuthorizedStaff: [
+        localRecord,
+        ...prev.localAuthorizedStaff.filter((item) => item.staffId !== staffId),
+      ],
+    }));
+    return { savedToCloud: false, record: localRecord };
+  };
+
+  const handleRemoveAuthorizedStaff = async (staffId: string): Promise<void> => {
+    const ownerId = emailToStaffDocId(BOOTSTRAPPED_OWNER_EMAIL);
+    if (staffId === ownerId) return;
+    if (isLiveAdmin && authUser) {
+      await removeAuthorizedStaffEmail(staffId);
+    }
+    setState((prev) => ({
+      ...prev,
+      localAuthorizedStaff: prev.localAuthorizedStaff.filter((item) => item.staffId !== staffId),
+    }));
   };
 
   const handleToggleLiveMemberFee = async (memberId: string, nextStatus: FeeStatus) => {
@@ -489,9 +874,12 @@ export default function App() {
       handleSetFeeStatus(nextStatus);
       return;
     }
-    setLocalWalkInMembers((prev) =>
-      prev.map((m) => (m.id === memberId ? { ...m, feeStatus: nextStatus } : m))
-    );
+    setState((prev) => ({
+      ...prev,
+      walkInMembers: prev.walkInMembers.map((m) =>
+        m.id === memberId ? { ...m, feeStatus: nextStatus } : m
+      ),
+    }));
     setLocalDemoFeeOverrides((prev) => ({ ...prev, [memberId]: nextStatus }));
   };
 
@@ -502,10 +890,10 @@ export default function App() {
     tier: 'Socio Fundador' | 'Socio Club';
     feeStatus: FeeStatus;
     assignedCoach: string;
-  }) => {
+  }): Promise<{ savedToCloud: boolean; member: LiveGymMember }> => {
     if (isLiveAdmin && authUser) {
-      await createWalkInPilotMember(input);
-      return;
+      const created = await createWalkInPilotMember(input);
+      return { savedToCloud: true, member: created };
     }
     const localId = `local_pilot_${Date.now()}`;
     const created: LiveGymMember = {
@@ -514,7 +902,7 @@ export default function App() {
       memberCode: generateMemberCodeFromUid(localId),
       name: input.name,
       tier: input.tier,
-      goal: 'Prueba piloto en sala',
+      goal: 'Alta en recepción',
       feeStatus: input.feeStatus,
       monthlyFee: input.tier === 'Socio Fundador' ? 34.9 : 46.9,
       streakDays: 0,
@@ -523,11 +911,15 @@ export default function App() {
       daysSinceLastVisit: 0,
       outreachStatus: 'pendiente',
       assignedCoach: input.assignedCoach,
-      isRealMember: false,
+      isRealMember: true,
       phone: input.phone,
       email: input.email,
     };
-    setLocalWalkInMembers((prev) => [created, ...prev]);
+    setState((prev) => ({
+      ...prev,
+      walkInMembers: [created, ...prev.walkInMembers],
+    }));
+    return { savedToCloud: false, member: created };
   };
 
   const activeCoach =
@@ -1013,37 +1405,76 @@ export default function App() {
     }));
   };
 
-  // Bidirectional Member <-> Coach Messaging & Voice Audio Handler
-  const handleSendDirectMessage = (msg: Omit<DirectMessage, 'id' | 'timestampLabel'>) => {
+  // Bidirectional Member <-> Coach Messaging & Voice Audio Handler (never silently drops cloud errors)
+  const handleSendDirectMessage = async (
+    msg: Omit<DirectMessage, 'id' | 'timestampLabel'>
+  ): Promise<SendDirectMessageResult> => {
     const now = new Date();
     const timeLabel = `Hoy, ${String(now.getHours()).padStart(2, '0')}:${String(
       now.getMinutes()
     ).padStart(2, '0')}`;
+    const msgId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const created: DirectMessage = {
       ...msg,
-      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: msgId,
       timestampLabel: timeLabel,
     };
+
+    // Guard: if not signed in with Google yet, save locally and clearly tell the user
+    if (!authUser) {
+      setState((prev) => ({
+        ...prev,
+        directMessages: [...prev.directMessages, created],
+      }));
+      return {
+        savedToCloud: false,
+      };
+    }
+
+    // Guard: coach replies to other members require an authorized gym/coach Google account
+    if (msg.senderRole === 'coach' && !isLiveAdmin) {
+      setState((prev) => ({
+        ...prev,
+        directMessages: [...prev.directMessages, created],
+      }));
+      return {
+        savedToCloud: false,
+        error: `Tu cuenta (${authUser.email}) tiene perfil de socio. Para responder como Coach a otros socios, conecta ${primaryGymEmail} o autoriza este correo en Dirección.`,
+      };
+    }
+
     setState((prev) => ({
       ...prev,
       directMessages: [...prev.directMessages, created],
     }));
 
-    if (authUser) {
-      const targetMemberUid =
-        msg.memberId === 'current-user' ? authUser.uid : msg.memberId;
-      void sendLiveMessage({
+    const targetMemberUid =
+      msg.memberId === 'current-user' ? authUser.uid : msg.memberId;
+
+    try {
+      await sendLiveMessage({
+        id: msgId,
         authorUid: authUser.uid,
         coachId: msg.coachId,
         memberId: targetMemberUid,
         senderRole: msg.senderRole === 'coach' ? 'coach' : 'socio',
         senderName: msg.senderName,
         kind: msg.kind,
-        text: msg.text,
+        text: msg.kind === 'audio' ? msg.audioLabel || msg.text : msg.text,
         audioDataUrl:
           msg.audioUrl && msg.audioUrl.startsWith('data:') ? msg.audioUrl : undefined,
         audioDurationSec: msg.audioDurationSec,
       });
+      return { savedToCloud: true };
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error
+          ? error.message
+          : 'No se pudo enviar el mensaje a la nube. Revisa tu conexión.';
+      return {
+        savedToCloud: false,
+        error: errorMsg,
+      };
     }
   };
 
@@ -1209,6 +1640,21 @@ export default function App() {
   if (!state.profile.isRegistered || editingProfile) {
     return (
       <>
+        {authError && (
+          <div
+            role="alert"
+            className="bg-red-950/95 border-b border-red-500/50 px-4 py-3 text-xs text-red-100 flex items-center justify-between gap-3"
+          >
+            <span className="max-w-4xl mx-auto">{authError}</span>
+            <button
+              type="button"
+              onClick={() => setAuthError(null)}
+              className="px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/20 text-white font-semibold shrink-0 cursor-pointer"
+            >
+              Cerrar
+            </button>
+          </div>
+        )}
         <RegistrationView
           initialProfile={state.profile}
           authUser={authUser}
@@ -1301,6 +1747,92 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {authError && (
+        <div
+          role="alert"
+          className="bg-red-950/95 border-b border-red-500/50 px-4 py-3 text-xs text-red-100 flex items-center justify-between gap-3"
+        >
+          <span className="max-w-5xl mx-auto">{authError}</span>
+          <button
+            type="button"
+            onClick={() => setAuthError(null)}
+            className="px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/20 text-white font-semibold shrink-0 cursor-pointer"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {authNotice && (
+        <div
+          role="status"
+          className={`border-b px-4 py-2.5 text-xs flex items-center justify-between gap-3 ${
+            authNotice.tone === 'success'
+              ? 'bg-emerald-950/95 border-emerald-500/45 text-emerald-100'
+              : authNotice.tone === 'warning'
+                ? 'bg-amber-950/95 border-amber-500/45 text-amber-100'
+                : 'bg-[#0D1A2B] border-[#00A8FF]/40 text-sky-100'
+          }`}
+        >
+          <span className="max-w-5xl mx-auto font-medium">{authNotice.message}</span>
+          <button
+            type="button"
+            onClick={() => setAuthNotice(null)}
+            className="px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/20 text-white font-semibold shrink-0 cursor-pointer"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {/* Live Incoming Message / Audio / Routine Alert Banner (Both Socio & Coach) */}
+      {incomingAlert && (
+        <div
+          role="status"
+          className="bg-[#00A8FF]/18 border-b border-[#00A8FF]/55 px-4 py-2.5 text-xs text-white flex flex-wrap items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2.5 min-w-0 max-w-4xl">
+            <Bell className="w-4 h-4 text-[#33C1FF] shrink-0" />
+            <div className="min-w-0">
+              <p className="font-bold text-white truncate">{incomingAlert.title}</p>
+              <p className="text-slate-200 truncate">{incomingAlert.body}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                if (incomingAlert.coachId) {
+                  handleSelectCoach(incomingAlert.coachId);
+                }
+                if (incomingAlert.target === 'socio-chat') {
+                  setWorkspaceMode('socio');
+                  setActiveTab('entreno');
+                  setRequestedWorkoutSubtab('mensajes');
+                } else if (incomingAlert.target === 'socio-rutinas') {
+                  setWorkspaceMode('socio');
+                  setActiveTab('entreno');
+                  setRequestedWorkoutSubtab('coach');
+                } else {
+                  setWorkspaceMode('coach');
+                }
+                setIncomingAlert(null);
+              }}
+              className="min-h-[32px] px-3 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] font-bold cursor-pointer"
+            >
+              {incomingAlert.actionLabel}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIncomingAlert(null)}
+              className="min-h-[32px] px-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white font-semibold cursor-pointer"
+            >
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Container */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-5 sm:py-7 pb-24 md:pb-12 space-y-6">
@@ -1398,11 +1930,80 @@ export default function App() {
               </button>
             </div>
 
-            <p className="text-xs text-slate-400 hidden lg:block">
-              {workspaceMode === 'direccion' || workspaceMode === 'coach'
-                ? `Coach ${activeCoach.name} · Acceso total`
-                : `${state.profile.name} · ${state.profile.tier}`}
-            </p>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              {notificationPermission !== 'unsupported' && (
+                notificationPermission === 'granted' ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleTestNotification()}
+                    title="Notificaciones activas · Pulsa para probar"
+                    className="min-h-[34px] px-2.5 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/45 text-emerald-200 font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Bell className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>Avisos ON</span>
+                  </button>
+                ) : notificationPermission === 'denied' ? (
+                  <span
+                    title="Activa los permisos de notificación en los ajustes del navegador"
+                    className="min-h-[34px] px-2.5 py-1 rounded-lg bg-rose-950/50 border border-rose-500/40 text-rose-200 font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
+                  >
+                    <BellOff className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    <span>Avisos OFF</span>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleRequestNotificationPermission()}
+                    className="min-h-[34px] px-2.5 py-1 rounded-lg bg-[#00A8FF]/18 hover:bg-[#00A8FF] hover:text-[#04070D] border border-[#00A8FF]/55 text-[#33C1FF] font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
+                  >
+                    <Bell className="w-3.5 h-3.5 shrink-0" />
+                    <span>Activar avisos</span>
+                  </button>
+                )
+              )}
+
+              {authUser ? (
+                <div
+                  className={`inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg border ${
+                    isLiveAdmin
+                      ? 'bg-emerald-950/60 border-emerald-500/45 text-emerald-200'
+                      : 'bg-amber-950/50 border-amber-500/45 text-amber-200'
+                  }`}
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      isLiveAdmin ? 'bg-emerald-400' : 'bg-amber-400'
+                    }`}
+                  />
+                  <span className="font-semibold truncate max-w-[180px] sm:max-w-[240px]">
+                    {isLiveAdmin ? 'Conectado (Gimnasio)' : 'Conectado (Socio)'}: {authUser.email}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void handleSignOutGoogle()}
+                    className="underline hover:text-white cursor-pointer shrink-0"
+                  >
+                    Salir
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  disabled={isSigningIn}
+                  onClick={() => void handleSignInGoogle()}
+                  className="min-h-[34px] px-2.5 py-1 rounded-lg bg-[#0D121B] hover:border-[#00A8FF] border border-amber-500/40 text-amber-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-60"
+                >
+                  <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                  <span>
+                    {isSigningIn
+                      ? 'Conectando Google...'
+                      : authReady
+                        ? 'Sin conectar a Google · Conectar'
+                        : 'Comprobando sesión...'}
+                  </span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1414,10 +2015,18 @@ export default function App() {
             onSelectCoach={handleSelectCoach}
             authUser={authUser}
             isLiveAdmin={isLiveAdmin}
+            isSigningIn={isSigningIn}
+            primaryGymEmail={primaryGymEmail}
             onSignInGoogle={handleSignInGoogle}
+            onSignOutGoogle={handleSignOutGoogle}
             liveMembers={liveMembers}
             localDemoMembers={localDemoMembers}
             coachRoutines={mergedCoachRoutines}
+            directMessages={mergedDirectMessages}
+            onSendDirectMessage={handleSendDirectMessage}
+            notificationPermission={notificationPermission}
+            onRequestNotificationPermission={handleRequestNotificationPermission}
+            onTestNotification={handleTestNotification}
             onSendCoachRoutine={handleSendCoachRoutine}
             onPreviewRoutinesInMemberView={() => {
               setWorkspaceMode('socio');
@@ -1452,9 +2061,17 @@ export default function App() {
             memberProfile={state.profile}
             directMessages={mergedDirectMessages}
             onSendDirectMessage={handleSendDirectMessage}
+            notificationPermission={notificationPermission}
+            onRequestNotificationPermission={handleRequestNotificationPermission}
+            onTestNotification={handleTestNotification}
             onOpenPresentationKit={(tab) => setPresentationKitTab(tab)}
             authUser={authUser}
             isLiveAdmin={isLiveAdmin}
+            isSigningIn={isSigningIn}
+            primaryGymEmail={primaryGymEmail}
+            authorizedStaff={mergedAuthorizedStaff}
+            onAddAuthorizedStaff={handleAddAuthorizedStaff}
+            onRemoveAuthorizedStaff={handleRemoveAuthorizedStaff}
             onSignInGoogle={handleSignInGoogle}
             onSignOutGoogle={handleSignOutGoogle}
             liveMembers={liveMembers}
@@ -1500,6 +2117,13 @@ export default function App() {
                 profile={state.profile}
                 directMessages={mergedDirectMessages}
                 onSendDirectMessage={handleSendDirectMessage}
+                authUser={authUser}
+                onSignInGoogle={handleSignInGoogle}
+                notificationPermission={notificationPermission}
+                onRequestNotificationPermission={handleRequestNotificationPermission}
+                onTestNotification={handleTestNotification}
+                requestedSubtab={requestedWorkoutSubtab}
+                onConsumeRequestedSubtab={() => setRequestedWorkoutSubtab(null)}
               />
             )}
 

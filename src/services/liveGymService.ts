@@ -1,5 +1,6 @@
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -27,6 +28,13 @@ import {
   sanitizeId,
   sanitizeMemberCode,
 } from '../utils/qrPass';
+import {
+  emailToStaffDocId,
+  isValidStaffEmail,
+  normalizeStaffEmail,
+  type AuthorizedStaffRecord,
+  type AuthorizedStaffRole,
+} from '../utils/staffAuth';
 
 export interface LiveGymMember {
   id: string;
@@ -132,12 +140,109 @@ export async function checkIsLiveAdmin(user: User): Promise<boolean> {
   if (user.emailVerified && isOwnerEmail(user.email)) {
     return true;
   }
-  const path = `admins/${user.uid}`;
+  if (user.emailVerified && user.email) {
+    try {
+      const staffSnap = await getDoc(doc(db, 'authorizedStaff', emailToStaffDocId(user.email)));
+      if (staffSnap.exists()) return true;
+    } catch {
+      // Continue to legacy UID admin check
+    }
+  }
   try {
     const snap = await getDoc(doc(db, 'admins', user.uid));
     return snap.exists();
   } catch {
     return false;
+  }
+}
+
+export function subscribeAuthorizedStaff(
+  onData: (staff: AuthorizedStaffRecord[]) => void
+): Unsubscribe {
+  const path = 'authorizedStaff';
+  const q = query(collection(db, path), orderBy('updatedAt', 'desc'), limit(30));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: AuthorizedStaffRecord[] = snapshot.docs.map((snap) => {
+        const d = snap.data();
+        const role: AuthorizedStaffRole =
+          d.role === 'gym-main' || d.role === 'owner' || d.role === 'scanner'
+            ? d.role
+            : 'coach';
+        return {
+          staffId: snap.id,
+          email: String(d.email ?? ''),
+          label: String(d.label ?? 'Cuenta autorizada'),
+          role,
+          addedByUid: String(d.addedByUid ?? ''),
+          isCloudSynced: true,
+        };
+      });
+      onData(list);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+export async function addAuthorizedStaffEmail(params: {
+  email: string;
+  label: string;
+  role: AuthorizedStaffRole;
+  addedByUid: string;
+}): Promise<AuthorizedStaffRecord> {
+  const cleanEmail = normalizeStaffEmail(params.email);
+  if (!isValidStaffEmail(cleanEmail)) {
+    throw new Error('Escribe un correo electrónico válido (ej. fitnessdream@gmail.com).');
+  }
+  const staffId = emailToStaffDocId(cleanEmail);
+  const cleanLabel = clampText(params.label, 80, 'Cuenta del Gimnasio');
+  const cleanRole: AuthorizedStaffRole =
+    params.role === 'gym-main' || params.role === 'owner' || params.role === 'scanner'
+      ? params.role
+      : 'coach';
+  const ref = doc(db, 'authorizedStaff', staffId);
+
+  try {
+    const existingSnap = await getDoc(ref);
+    if (existingSnap.exists()) {
+      await updateDoc(ref, {
+        label: cleanLabel,
+        role: cleanRole,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(ref, {
+        staffId,
+        email: cleanEmail,
+        label: cleanLabel,
+        role: cleanRole,
+        addedByUid: sanitizeId(params.addedByUid),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    return {
+      staffId,
+      email: cleanEmail,
+      label: cleanLabel,
+      role: cleanRole,
+      addedByUid: sanitizeId(params.addedByUid),
+      isCloudSynced: true,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `authorizedStaff/${staffId}`);
+  }
+}
+
+export async function removeAuthorizedStaffEmail(staffId: string): Promise<void> {
+  const cleanId = sanitizeId(staffId);
+  try {
+    await deleteDoc(doc(db, 'authorizedStaff', cleanId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `authorizedStaff/${cleanId}`);
   }
 }
 
@@ -640,6 +745,7 @@ export async function publishLiveRoutine(params: {
  * Sends a real-time text or short audio message between a member and Javi/Joel.
  */
 export async function sendLiveMessage(params: {
+  id?: string;
   authorUid: string;
   coachId: string;
   memberId: string;
@@ -650,7 +756,9 @@ export async function sendLiveMessage(params: {
   audioDataUrl?: string;
   audioDurationSec?: number;
 }): Promise<void> {
-  const msgId = sanitizeId(`msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+  const msgId = sanitizeId(
+    params.id || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+  );
   const payload: Record<string, unknown> = {
     coachId: sanitizeId(params.coachId),
     memberId: sanitizeId(params.memberId),
@@ -661,18 +769,37 @@ export async function sendLiveMessage(params: {
     createdAt: serverTimestamp(),
   };
 
-  if (params.text !== undefined) {
+  if (params.text !== undefined && params.text.trim().length > 0) {
     payload.text = clampText(params.text, 1000);
   }
-  if (params.audioDataUrl && params.audioDataUrl.length <= 350000) {
+  if (params.kind === 'audio') {
+    if (!params.audioDataUrl || !params.audioDataUrl.startsWith('data:audio')) {
+      throw new Error(
+        'No se capturó audio del micrófono. Permite el acceso al micrófono en tu navegador e inténtalo de nuevo.'
+      );
+    }
+    if (params.audioDataUrl.length > 350000) {
+      throw new Error(
+        'La nota de voz supera el tamaño máximo en la nube (máx. 45 segundos). Graba un audio más breve.'
+      );
+    }
     payload.audioDataUrl = params.audioDataUrl;
-    payload.audioDurationSec = Math.min(120, Math.max(0, Number(params.audioDurationSec ?? 5)));
+    payload.audioDurationSec = Math.min(120, Math.max(1, Math.round(Number(params.audioDurationSec ?? 5))));
   }
 
   try {
     await setDoc(doc(db, 'directMessages', msgId), payload);
   } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `directMessages/${msgId}`);
+    console.error('[FitnessDreams] Error enviando mensaje a Firestore:', error);
+    const rawMsg = error instanceof Error ? error.message : String(error);
+    if (rawMsg.toLowerCase().includes('permission')) {
+      throw new Error(
+        params.senderRole === 'coach'
+          ? 'Permiso denegado en la nube: conecta una cuenta de Google autorizada de Coach/Gimnasio para enviar mensajes a socios.'
+          : 'Permiso denegado en la nube: vuelve a iniciar sesión con tu cuenta de Google verificada para enviar mensajes a tu Coach.'
+      );
+    }
+    throw new Error(`No se pudo enviar a la nube (${rawMsg}). Revisa tu conexión e inténtalo de nuevo.`);
   }
 }
 
@@ -846,12 +973,13 @@ export function subscribeLiveRoutines(
 export function subscribeLiveMessages(
   isAdminUser: boolean,
   uid: string,
-  onData: (messages: LiveDirectMessageDoc[]) => void
+  onData: (messages: LiveDirectMessageDoc[]) => void,
+  onError?: (errorMessage: string) => void
 ): Unsubscribe {
   const path = 'directMessages';
   const q = isAdminUser
-    ? query(collection(db, path), orderBy('createdAt', 'desc'), limit(60))
-    : query(collection(db, path), where('memberId', '==', sanitizeId(uid)), limit(60));
+    ? query(collection(db, path), orderBy('createdAt', 'desc'), limit(100))
+    : query(collection(db, path), where('memberId', '==', sanitizeId(uid)), limit(100));
 
   return onSnapshot(
     q,
@@ -880,7 +1008,10 @@ export function subscribeLiveMessages(
       onData(list);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      console.error('[FitnessDreams] Error suscripción mensajes:', error);
+      onError?.(
+        error instanceof Error ? error.message : 'No se pudieron sincronizar los mensajes en directo.'
+      );
     }
   );
 }

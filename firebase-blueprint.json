@@ -371,12 +371,58 @@
         "authorUid",
         "createdAt"
       ]
+    },
+    "AuthorizedStaffEmail": {
+      "title": "AuthorizedStaffEmail",
+      "description": "Authorized gym owner, official club Google account (e.g. fitnessdream), coach, or scanner email address allowed full gym management access.",
+      "type": "object",
+      "properties": {
+        "staffId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 160
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "role": {
+          "type": "string",
+          "enum": ["gym-main", "owner", "coach", "scanner"]
+        },
+        "addedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["staffId", "email", "label", "role", "addedByUid", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/admins/{adminUid}": {
       "schema": { "$ref": "#/entities/AdminUser" },
-      "description": "Authorized coaches, receptionists, and scanner operators."
+      "description": "Authorized coaches, receptionists, and scanner operators keyed by UID."
+    },
+    "/authorizedStaff/{staffId}": {
+      "schema": { "$ref": "#/entities/AuthorizedStaffEmail" },
+      "description": "Authorized gym and coach Google email addresses keyed by normalized email doc ID so the owner can switch to the official gym email or add coaches from the app."
     },
     "/members/{memberId}": {
       "schema": { "$ref": "#/entities/GymMember" },

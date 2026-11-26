@@ -2,7 +2,9 @@ import { initializeApp } from 'firebase/app';
 import {
   GoogleAuthProvider,
   getAuth,
+  getRedirectResult,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -73,9 +75,33 @@ export function isOwnerEmail(email: string | null | undefined): boolean {
   return Boolean(email && email.toLowerCase() === BOOTSTRAPPED_OWNER_EMAIL.toLowerCase());
 }
 
-export async function signInWithGoogleAccount(): Promise<User> {
-  const result = await signInWithPopup(auth, googleProvider);
-  return result.user;
+export async function signInWithGoogleAccount(): Promise<User | null> {
+  try {
+    const result = await signInWithPopup(auth, googleProvider);
+    return result.user;
+  } catch (err) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code)
+        : '';
+    if (
+      code === 'auth/popup-blocked' ||
+      code === 'auth/operation-not-supported-in-this-environment'
+    ) {
+      await signInWithRedirect(auth, googleProvider);
+      return null;
+    }
+    throw err;
+  }
+}
+
+export async function completeGoogleRedirectSignIn(): Promise<User | null> {
+  try {
+    const result = await getRedirectResult(auth);
+    return result?.user ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function signOutGoogleAccount(): Promise<void> {

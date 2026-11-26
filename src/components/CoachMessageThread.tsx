@@ -1,6 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
+  Bell,
+  BellOff,
   Check,
+  Cloud,
+  CloudOff,
   Mic,
   Pause,
   Play,
@@ -11,6 +16,17 @@ import {
 } from 'lucide-react';
 import type { CoachProfile, DirectMessage, MessageTopicTag } from '../types/gym';
 import { formatSecondsClock, getConversationMessages } from '../utils/gymLogic';
+import {
+  MAX_AUDIO_RECORDING_SECONDS,
+  selectBestAudioMimeType,
+  validateAudioPayload,
+} from '../utils/messaging';
+import type { NotificationPermissionState } from '../utils/notifications';
+
+export interface SendDirectMessageResult {
+  savedToCloud: boolean;
+  error?: string;
+}
 
 interface CoachMessageThreadProps {
   viewerRole: 'member' | 'coach';
@@ -19,7 +35,16 @@ interface CoachMessageThreadProps {
   memberName: string;
   memberAvatar?: string;
   messages: DirectMessage[];
-  onSendMessage: (msg: Omit<DirectMessage, 'id' | 'timestampLabel'>) => void;
+  onSendMessage: (
+    msg: Omit<DirectMessage, 'id' | 'timestampLabel'>
+  ) => Promise<SendDirectMessageResult | void> | SendDirectMessageResult | void;
+  isCloudConnected?: boolean;
+  cloudStatusHint?: string;
+  onConnectGoogle?: () => Promise<void> | void;
+  notificationPermission?: NotificationPermissionState;
+  onRequestNotificationPermission?: () => Promise<void> | void;
+  onTestNotification?: () => Promise<void> | void;
+  compact?: boolean;
 }
 
 const MEMBER_TOPICS: MessageTopicTag[] = [
@@ -51,12 +76,24 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
   memberAvatar,
   messages,
   onSendMessage,
+  isCloudConnected,
+  cloudStatusHint,
+  onConnectGoogle,
+  notificationPermission,
+  onRequestNotificationPermission,
+  onTestNotification,
+  compact = false,
 }) => {
   const [topicTag, setTopicTag] = useState<MessageTopicTag>(
     viewerRole === 'member' ? 'Solicitud de rutina' : 'Seguimiento'
   );
   const [draftText, setDraftText] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
+  const [deliveryNotice, setDeliveryNotice] = useState<{
+    tone: 'success' | 'warning';
+    text: string;
+  } | null>(null);
+  const [isSending, setIsSending] = useState(false);
 
   // Voice audio recording state
   const [isRecording, setIsRecording] = useState(false);
@@ -67,6 +104,7 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
     audioUrl: string;
     durationSec: number;
     mode: 'mic' | 'simulado';
+    sizeKb?: number;
   } | null>(null);
 
   // Audio playback state
@@ -87,7 +125,7 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
     [messages, coach.id, memberId]
   );
 
-  // Recording elapsed seconds timer
+  // Recording elapsed seconds timer with automatic 45s cap so Firestore payload always succeeds
   useEffect(() => {
     if (!isRecording) return;
     recordingSecRef.current = 0;
@@ -95,6 +133,15 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
     const id = window.setInterval(() => {
       recordingSecRef.current += 1;
       setRecordingSec(recordingSecRef.current);
+      if (recordingSecRef.current >= MAX_AUDIO_RECORDING_SECONDS) {
+        if (
+          mediaRecorderRef.current &&
+          mediaRecorderRef.current.state !== 'inactive'
+        ) {
+          mediaRecorderRef.current.stop();
+        }
+        setIsRecording(false);
+      }
     }, 1000);
     return () => window.clearInterval(id);
   }, [isRecording]);
@@ -136,16 +183,15 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
     setPlaybackProgress(0);
   };
 
-  const playVoiceNote = (msg: DirectMessage) => {
-    if (playingMsgId === msg.id) {
+  const playAudioUrl = (playId: string, url: string, fallbackDurationSec: number) => {
+    if (playingMsgId === playId) {
       stopPlayback();
       return;
     }
     stopPlayback();
-    setPlayingMsgId(msg.id);
+    setPlayingMsgId(playId);
     setPlaybackProgress(0);
 
-    const url = msg.audioUrl ?? 'synthetic-voice';
     const isRealAudio =
       url.startsWith('data:audio') || url.startsWith('blob:') || url.startsWith('http');
 
@@ -154,17 +200,28 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
         const audio = new Audio(url);
         audioElRef.current = audio;
         audio.ontimeupdate = () => {
-          const dur = audio.duration && Number.isFinite(audio.duration) ? audio.duration : msg.audioDurationSec || 5;
-          setPlaybackProgress(Math.min(100, Math.round((audio.currentTime / Math.max(1, dur)) * 100)));
+          const dur =
+            audio.duration && Number.isFinite(audio.duration)
+              ? audio.duration
+              : fallbackDurationSec || 5;
+          setPlaybackProgress(
+            Math.min(100, Math.round((audio.currentTime / Math.max(1, dur)) * 100))
+          );
         };
         audio.onended = () => {
           stopPlayback();
         };
         audio.onerror = () => {
-          runSimulatedPlayback(msg.audioDurationSec ?? 6);
+          setFormError(
+            'Este navegador no pudo reproducir el formato de este audio. Prueba desde Chrome o Safari.'
+          );
+          stopPlayback();
         };
         void audio.play().catch(() => {
-          runSimulatedPlayback(msg.audioDurationSec ?? 6);
+          setFormError(
+            'Pulsa de nuevo para permitir la reproducción de audio en tu dispositivo.'
+          );
+          stopPlayback();
         });
         return;
       } catch {
@@ -172,7 +229,11 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
       }
     }
 
-    runSimulatedPlayback(msg.audioDurationSec ?? 6);
+    runSimulatedPlayback(fallbackDurationSec || 5);
+  };
+
+  const playVoiceNote = (msg: DirectMessage) => {
+    playAudioUrl(msg.id, msg.audioUrl ?? 'synthetic-voice', msg.audioDurationSec ?? 5);
   };
 
   const runSimulatedPlayback = (durationSec: number) => {
@@ -180,7 +241,6 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
     const totalMs = safeSec * 1000;
     const startedAt = Date.now();
 
-    // Subtle soft confirmation chime via Web Audio API (safe in headless / muted contexts)
     try {
       const AudioContextCtor =
         window.AudioContext ||
@@ -216,6 +276,7 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
 
   const handleStartRecording = async () => {
     setFormError(null);
+    setDeliveryNotice(null);
     setPendingAudio(null);
 
     if (
@@ -225,10 +286,34 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
       typeof MediaRecorder !== 'undefined'
     ) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
         mediaStreamRef.current = stream;
         chunksRef.current = [];
-        const recorder = new MediaRecorder(stream);
+
+        const preferredMime = selectBestAudioMimeType(
+          typeof MediaRecorder.isTypeSupported === 'function'
+            ? (m) => MediaRecorder.isTypeSupported(m)
+            : undefined
+        );
+        const recorderOptions: MediaRecorderOptions = {
+          audioBitsPerSecond: 24000,
+        };
+        if (preferredMime) {
+          recorderOptions.mimeType = preferredMime;
+        }
+
+        let recorder: MediaRecorder;
+        try {
+          recorder = new MediaRecorder(stream, recorderOptions);
+        } catch {
+          recorder = new MediaRecorder(stream);
+        }
         mediaRecorderRef.current = recorder;
 
         recorder.ondataavailable = (ev) => {
@@ -239,51 +324,76 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
 
         recorder.onstop = () => {
           const duration = Math.max(1, recordingSecRef.current);
-          const blob = new Blob(chunksRef.current, {
-            type: recorder.mimeType || 'audio/webm',
-          });
+          const mimeType = recorder.mimeType || preferredMime || 'audio/webm';
+          const blob = new Blob(chunksRef.current, { type: mimeType });
           cleanupMediaStream();
+
+          if (blob.size === 0) {
+            setFormError(
+              'El micrófono no captó sonido. Mantén la grabación al menos 2 segundos e inténtalo de nuevo.'
+            );
+            return;
+          }
+
           const reader = new FileReader();
           reader.onloadend = () => {
-            const dataUrl =
-              typeof reader.result === 'string' && reader.result.startsWith('data:')
-                ? reader.result
-                : 'synthetic-voice';
+            const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+            const check = validateAudioPayload(dataUrl);
+            if (!check.valid) {
+              setFormError(check.error ?? 'Error al procesar el audio grabado.');
+              return;
+            }
             setPendingAudio({
               audioUrl: dataUrl,
               durationSec: duration,
               mode: 'mic',
+              sizeKb: Math.max(1, Math.round(dataUrl.length / 1024)),
             });
           };
           reader.readAsDataURL(blob);
         };
 
-        recorder.start();
+        recorder.start(250);
         setRecordingMode('mic');
         setIsRecording(true);
         return;
-      } catch {
-        // Microphone unavailable or blocked: switch cleanly to timed voice-note mode
+      } catch (err) {
+        cleanupMediaStream();
+        const errName = err instanceof Error ? err.name : '';
+        if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+          setFormError(
+            'Permiso de micrófono denegado. Activa el micrófono en el candado de la barra del navegador o en Ajustes del móvil y pulsa Grabar audio de nuevo.'
+          );
+          return;
+        }
+        if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
+          setFormError(
+            'No se ha detectado ningún micrófono en este dispositivo. Puedes enviar mensajes escritos o conectar un micrófono.'
+          );
+          return;
+        }
+        setFormError(
+          'No se pudo iniciar el micrófono en este navegador. Asegúrate de entrar por HTTPS y conceder permiso de micrófono.'
+        );
+        return;
       }
     }
 
-    setRecordingMode('simulado');
-    setIsRecording(true);
+    setFormError(
+      'Este navegador no soporta grabación de micrófono directa. Usa Chrome en Android o Safari en iPhone.'
+    );
   };
 
   const handleStopRecording = () => {
     if (!isRecording) return;
     setIsRecording(false);
-    if (recordingMode === 'mic' && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+    if (
+      recordingMode === 'mic' &&
+      mediaRecorderRef.current &&
+      mediaRecorderRef.current.state !== 'inactive'
+    ) {
       mediaRecorderRef.current.stop();
-      return;
     }
-    const duration = Math.max(2, recordingSecRef.current);
-    setPendingAudio({
-      audioUrl: 'synthetic-voice',
-      durationSec: duration,
-      mode: 'simulado',
-    });
   };
 
   const handleCancelRecording = () => {
@@ -297,55 +407,104 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
     setAudioCaption('');
   };
 
-  const handleSendPendingAudio = () => {
-    if (!pendingAudio) return;
+  const handleSendPendingAudio = async () => {
+    if (!pendingAudio || isSending) return;
+    const validation = validateAudioPayload(pendingAudio.audioUrl);
+    if (!validation.valid) {
+      setFormError(validation.error ?? 'Audio no válido.');
+      return;
+    }
+
     const defaultLabel =
       viewerRole === 'member'
         ? `Nota de voz de ${memberName} · ${topicTag}`
         : `Nota de voz de Coach ${coach.name} · ${topicTag}`;
+    const caption = audioCaption.trim() || defaultLabel;
 
-    onSendMessage({
-      coachId: coach.id,
-      memberId,
-      senderRole: viewerRole,
-      senderName: viewerRole === 'member' ? memberName : coach.name,
-      senderAvatar: viewerRole === 'member' ? memberAvatar : coach.avatarUrl,
-      kind: 'audio',
-      audioUrl: pendingAudio.audioUrl,
-      audioDurationSec: pendingAudio.durationSec,
-      audioLabel: audioCaption.trim() || defaultLabel,
-      topicTag,
-    });
+    setIsSending(true);
+    setFormError(null);
+    setDeliveryNotice(null);
+    try {
+      const result = await onSendMessage({
+        coachId: coach.id,
+        memberId,
+        senderRole: viewerRole,
+        senderName: viewerRole === 'member' ? memberName : coach.name,
+        senderAvatar: viewerRole === 'member' ? memberAvatar : coach.avatarUrl,
+        kind: 'audio',
+        text: caption,
+        audioUrl: pendingAudio.audioUrl,
+        audioDurationSec: pendingAudio.durationSec,
+        audioLabel: caption,
+        topicTag,
+      });
 
-    setPendingAudio(null);
-    setAudioCaption('');
-    window.setTimeout(() => {
-      threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }, 60);
+      setPendingAudio(null);
+      setAudioCaption('');
+
+      if (result && result.savedToCloud) {
+        setDeliveryNotice({
+          tone: 'success',
+          text: 'Audio enviado en tiempo real a la nube.',
+        });
+      } else if (result && result.error) {
+        setFormError(result.error);
+      } else if (result && !result.savedToCloud) {
+        setDeliveryNotice({
+          tone: 'warning',
+          text: 'Audio guardado solo en este dispositivo. Conecta tu cuenta de Google para enviarlo en directo.',
+        });
+      }
+      window.setTimeout(() => {
+        threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 60);
+    } finally {
+      setIsSending(false);
+    }
   };
 
-  const handleSendText = (e: React.FormEvent) => {
+  const handleSendText = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSending) return;
     const cleaned = draftText.trim();
     if (!cleaned) {
       setFormError('Escribe un mensaje o graba una nota de voz antes de enviar.');
       return;
     }
+    setIsSending(true);
     setFormError(null);
-    onSendMessage({
-      coachId: coach.id,
-      memberId,
-      senderRole: viewerRole,
-      senderName: viewerRole === 'member' ? memberName : coach.name,
-      senderAvatar: viewerRole === 'member' ? memberAvatar : coach.avatarUrl,
-      kind: 'text',
-      text: cleaned,
-      topicTag,
-    });
-    setDraftText('');
-    window.setTimeout(() => {
-      threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }, 60);
+    setDeliveryNotice(null);
+    try {
+      const result = await onSendMessage({
+        coachId: coach.id,
+        memberId,
+        senderRole: viewerRole,
+        senderName: viewerRole === 'member' ? memberName : coach.name,
+        senderAvatar: viewerRole === 'member' ? memberAvatar : coach.avatarUrl,
+        kind: 'text',
+        text: cleaned,
+        topicTag,
+      });
+      setDraftText('');
+      if (result && result.savedToCloud) {
+        setDeliveryNotice({
+          tone: 'success',
+          text: 'Mensaje enviado en tiempo real a la nube.',
+        });
+      } else if (result && result.error) {
+        setFormError(result.error);
+      } else if (result && !result.savedToCloud) {
+        setDeliveryNotice({
+          tone: 'warning',
+          text: 'Guardado solo en este dispositivo. Conecta Google para que llegue al otro móvil/PC.',
+        });
+      }
+      window.setTimeout(() => {
+        threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 60);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   const topics = viewerRole === 'member' ? MEMBER_TOPICS : COACH_TOPICS;
@@ -380,51 +539,129 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
   return (
     <div className="rounded-2xl bg-[#0D121B] border border-white/10 overflow-hidden flex flex-col">
       {/* Conversation Header */}
-      <div className="px-5 py-4 border-b border-white/8 flex flex-wrap items-center justify-between gap-3">
+      <div className="px-4 sm:px-5 py-3.5 border-b border-white/8 flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-3 min-w-0">
           {viewerRole === 'member' ? (
             <img
               src={coach.avatarUrl}
               alt={`Coach ${coach.name}`}
               referrerPolicy="no-referrer"
-              className="w-11 h-12 rounded-xl object-cover object-top border border-[#00A8FF]/60 shrink-0"
+              className="w-10 h-11 rounded-xl object-cover object-top border border-[#00A8FF]/60 shrink-0"
             />
           ) : memberAvatar ? (
             <img
               src={memberAvatar}
               alt={memberName}
-              className="w-11 h-11 rounded-xl object-cover object-top border border-[#00A8FF]/50 shrink-0"
+              className="w-10 h-10 rounded-xl object-cover object-top border border-[#00A8FF]/50 shrink-0"
             />
           ) : (
-            <div className="w-11 h-11 rounded-xl bg-[#131B28] border border-white/15 flex items-center justify-center text-xs font-bold font-mono text-[#33C1FF] shrink-0">
+            <div className="w-10 h-10 rounded-xl bg-[#131B28] border border-white/15 flex items-center justify-center text-xs font-bold font-mono text-[#33C1FF] shrink-0">
               {getInitials(memberName)}
             </div>
           )}
 
           <div className="min-w-0">
-            <p className="text-xs font-medium text-[#33C1FF]">
+            <p className="text-[11px] font-medium text-[#33C1FF] truncate">
               {viewerRole === 'member'
                 ? `${coach.role} · Canal directo de texto y audio`
-                : `Conversación directa · Coach ${coach.name} ↔ Socio`}
+                : `Chat directo · Coach ${coach.name} ↔ Socio`}
             </p>
-            <h3 className="text-lg font-bold text-white truncate">
+            <h3 className="text-base sm:text-lg font-bold text-white truncate">
               {viewerRole === 'member' ? `Coach ${coach.name}` : memberName}
             </h3>
           </div>
         </div>
 
-        <span className="text-xs font-mono tabular-nums text-slate-400">
-          {threadMessages.length} {threadMessages.length === 1 ? 'mensaje' : 'mensajes'}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Notification Permission Controls for BOTH Member & Coach */}
+          {onRequestNotificationPermission && notificationPermission !== 'unsupported' && (
+            notificationPermission === 'granted' ? (
+              <div className="inline-flex items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-[11px] font-semibold text-emerald-300">
+                  <Bell className="w-3 h-3" />
+                  Avisos activos
+                </span>
+                {onTestNotification && (
+                  <button
+                    type="button"
+                    onClick={() => void onTestNotification()}
+                    className="min-h-[30px] px-2 rounded-lg bg-[#131B28] hover:border-[#00A8FF] border border-white/12 text-[11px] font-semibold text-slate-200 hover:text-white cursor-pointer"
+                  >
+                    Probar
+                  </button>
+                )}
+              </div>
+            ) : notificationPermission === 'denied' ? (
+              <span
+                title="Permite las notificaciones en los ajustes del navegador para recibir avisos"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-950/50 border border-rose-500/40 text-[11px] font-semibold text-rose-200"
+              >
+                <BellOff className="w-3 h-3" />
+                Avisos bloqueados en navegador
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void onRequestNotificationPermission()}
+                className="min-h-[34px] px-3 rounded-lg bg-[#00A8FF]/18 hover:bg-[#00A8FF] hover:text-[#04070D] border border-[#00A8FF]/55 text-[11px] font-bold text-[#33C1FF] flex items-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Bell className="w-3.5 h-3.5 shrink-0" />
+                Activar notificaciones
+              </button>
+            )
+          )}
+
+          <span className="text-xs font-mono tabular-nums text-slate-400">
+            {threadMessages.length} {threadMessages.length === 1 ? 'mensaje' : 'mensajes'}
+          </span>
+        </div>
       </div>
+
+      {/* Real-time Cloud Sync Status Strip */}
+      {typeof isCloudConnected === 'boolean' && (
+        <div
+          className={`px-4 sm:px-5 py-2.5 border-b text-xs flex flex-wrap items-center justify-between gap-2 ${
+            isCloudConnected
+              ? 'bg-emerald-950/35 border-emerald-500/25 text-emerald-200'
+              : 'bg-amber-950/45 border-amber-500/35 text-amber-100'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {isCloudConnected ? (
+              <Cloud className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            ) : (
+              <CloudOff className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+            )}
+            <span className="leading-snug">
+              {cloudStatusHint ||
+                (isCloudConnected
+                  ? 'Nube en directo conectada: textos y notas de voz llegan al instante.'
+                  : viewerRole === 'member'
+                    ? 'Conecta tu cuenta de Google para que tu Coach reciba tus mensajes y audios en directo.'
+                    : 'Conecta la cuenta Google autorizada del gimnasio/coach para recibir y responder en directo.')}
+            </span>
+          </div>
+          {!isCloudConnected && onConnectGoogle && (
+            <button
+              type="button"
+              onClick={() => void onConnectGoogle()}
+              className="min-h-[32px] px-3 rounded-lg bg-amber-400 hover:bg-amber-300 text-[#04070D] text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0"
+            >
+              Conectar Google
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Messages Feed */}
       <div
-        className="p-4 sm:p-5 space-y-3.5 max-h-[420px] overflow-y-auto bg-[#06080D]/60"
+        className={`p-4 sm:p-5 space-y-3 overflow-y-auto bg-[#06080D]/60 ${
+          compact ? 'max-h-[310px]' : 'max-h-[420px]'
+        }`}
         aria-live="polite"
       >
         {threadMessages.length === 0 ? (
-          <div className="py-10 text-center space-y-1.5">
+          <div className="py-8 text-center space-y-1.5">
             <p className="text-sm font-semibold text-white">Aún no hay mensajes en este canal</p>
             <p className="text-xs text-slate-400 max-w-md mx-auto">
               {viewerRole === 'member'
@@ -436,6 +673,7 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
           threadMessages.map((msg) => {
             const isMine = msg.senderRole === viewerRole;
             const isPlaying = playingMsgId === msg.id;
+            const captionText = msg.audioLabel || (msg.kind === 'audio' ? msg.text : undefined);
 
             return (
               <div
@@ -443,7 +681,7 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
                 className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}
               >
                 <div
-                  className={`max-w-[90%] sm:max-w-[78%] rounded-2xl px-4 py-3 space-y-2 border ${
+                  className={`max-w-[92%] sm:max-w-[82%] rounded-2xl px-3.5 py-2.5 space-y-2 border ${
                     isMine
                       ? 'bg-[#00A8FF]/16 border-[#00A8FF]/45 text-white'
                       : 'bg-[#0D121B] border-white/10 text-slate-100'
@@ -485,11 +723,8 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
                           )}
                         </button>
 
-                        <div className="flex-1 min-w-[140px] space-y-1.5">
-                          <div
-                            className="flex items-end gap-0.5 h-6"
-                            aria-hidden="true"
-                          >
+                        <div className="flex-1 min-w-[130px] space-y-1.5">
+                          <div className="flex items-end gap-0.5 h-6" aria-hidden="true">
                             {WAVEFORM_BARS.map((height, idx) => {
                               const barPct = ((idx + 1) / WAVEFORM_BARS.length) * 100;
                               const activeBar = isPlaying && barPct <= playbackProgress;
@@ -507,15 +742,19 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
                           <div className="flex items-center justify-between text-[11px] font-mono tabular-nums text-slate-300">
                             <span className="flex items-center gap-1">
                               <Volume2 className="w-3 h-3 text-[#33C1FF]" />
-                              {isPlaying ? 'Reproduciendo...' : 'Nota de voz'}
+                              {isPlaying
+                                ? 'Reproduciendo...'
+                                : msg.audioUrl?.startsWith('data:audio')
+                                  ? 'Audio real'
+                                  : 'Nota de voz'}
                             </span>
                             <span>{formatSecondsClock(msg.audioDurationSec ?? 5)}</span>
                           </div>
                         </div>
                       </div>
 
-                      {msg.audioLabel && (
-                        <p className="text-xs text-slate-300 leading-snug">{msg.audioLabel}</p>
+                      {captionText && (
+                        <p className="text-xs text-slate-300 leading-snug">{captionText}</p>
                       )}
                     </div>
                   )}
@@ -528,52 +767,58 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
       </div>
 
       {/* Composer Footer: Topic selector + Quick templates + Text & Voice Recorder */}
-      <div className="p-4 sm:p-5 border-t border-white/8 space-y-3.5 bg-[#0D121B]">
+      <div className="p-3.5 sm:p-4 border-t border-white/8 space-y-3 bg-[#0D121B]">
         {/* Topic selector & quick prompts */}
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Motivo del mensaje">
-            {topics.map((tag) => {
-              const active = topicTag === tag;
-              return (
-                <button
-                  key={tag}
-                  type="button"
-                  onClick={() => setTopicTag(tag)}
-                  aria-pressed={active}
-                  className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
-                    active
-                      ? 'bg-[#00A8FF] text-[#04070D]'
-                      : 'bg-[#06080D] text-slate-300 border border-white/10 hover:text-white'
-                  }`}
-                >
-                  {tag}
-                </button>
-              );
-            })}
-          </div>
+        {!compact && (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div
+              className="flex flex-wrap items-center gap-1.5"
+              role="group"
+              aria-label="Motivo del mensaje"
+            >
+              {topics.map((tag) => {
+                const active = topicTag === tag;
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => setTopicTag(tag)}
+                    aria-pressed={active}
+                    className={`min-h-[32px] px-2.5 rounded-lg text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                      active
+                        ? 'bg-[#00A8FF] text-[#04070D]'
+                        : 'bg-[#06080D] text-slate-300 border border-white/10 hover:text-white'
+                    }`}
+                  >
+                    {tag}
+                  </button>
+                );
+              })}
+            </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            {quickTemplates.map((tpl) => (
-              <button
-                key={tpl.label}
-                type="button"
-                onClick={() => {
-                  setTopicTag(tpl.tag);
-                  setDraftText(tpl.text);
-                }}
-                className="min-h-[32px] px-2.5 rounded-lg bg-[#131B28] hover:border-[#00A8FF] border border-white/10 text-[11px] text-slate-300 hover:text-white cursor-pointer whitespace-nowrap"
-              >
-                + {tpl.label}
-              </button>
-            ))}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {quickTemplates.map((tpl) => (
+                <button
+                  key={tpl.label}
+                  type="button"
+                  onClick={() => {
+                    setTopicTag(tpl.tag);
+                    setDraftText(tpl.text);
+                  }}
+                  className="min-h-[30px] px-2.5 rounded-lg bg-[#131B28] hover:border-[#00A8FF] border border-white/10 text-[11px] text-slate-300 hover:text-white cursor-pointer whitespace-nowrap"
+                >
+                  + {tpl.label}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Active Recording Strip */}
         {isRecording && (
           <div
             role="status"
-            className="rounded-xl bg-rose-950/50 border border-rose-500/45 p-3.5 flex flex-wrap items-center justify-between gap-3"
+            className="rounded-xl bg-rose-950/50 border border-rose-500/45 p-3 flex flex-wrap items-center justify-between gap-3"
           >
             <div className="flex items-center gap-2.5">
               <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse shrink-0" />
@@ -581,13 +826,11 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
                 <p className="text-xs font-bold text-white">
                   Grabando nota de voz ·{' '}
                   <span className="font-mono tabular-nums text-rose-300">
-                    {formatSecondsClock(recordingSec)}
+                    {formatSecondsClock(recordingSec)} / {formatSecondsClock(MAX_AUDIO_RECORDING_SECONDS)}
                   </span>
                 </p>
                 <p className="text-[11px] text-slate-300">
-                  {recordingMode === 'mic'
-                    ? 'Micrófono activo · Pulsa Detener para revisar y enviar'
-                    : 'Modo nota de voz rápida (sin micrófono) · Pulsa Detener para enviar'}
+                  Micrófono activo · Pulsa Detener para escuchar y enviar
                 </p>
               </div>
             </div>
@@ -595,16 +838,16 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
               <button
                 type="button"
                 onClick={handleStopRecording}
-                className="min-h-[40px] px-3.5 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                className="min-h-[38px] px-3.5 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
               >
                 <Square className="w-3.5 h-3.5 fill-current" />
-                Detener grabación
+                Detener
               </button>
               <button
                 type="button"
                 onClick={handleCancelRecording}
                 aria-label="Cancelar grabación de audio"
-                className="min-h-[40px] px-3 rounded-xl bg-[#06080D] text-slate-300 hover:text-white border border-white/10 text-xs cursor-pointer"
+                className="min-h-[38px] px-3 rounded-xl bg-[#06080D] text-slate-300 hover:text-white border border-white/10 text-xs cursor-pointer"
               >
                 Cancelar
               </button>
@@ -612,21 +855,35 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
           </div>
         )}
 
-        {/* Pending Audio Ready-to-Send Box */}
+        {/* Pending Audio Ready-to-Send Box (with local preview play button!) */}
         {pendingAudio && !isRecording && (
-          <div className="rounded-xl bg-[#00A8FF]/12 border border-[#00A8FF]/45 p-3.5 space-y-3">
+          <div className="rounded-xl bg-[#00A8FF]/12 border border-[#00A8FF]/45 p-3 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <Check className="w-4 h-4 text-[#33C1FF]" />
+                <button
+                  type="button"
+                  onClick={() =>
+                    playAudioUrl('pending-preview', pendingAudio.audioUrl, pendingAudio.durationSec)
+                  }
+                  aria-label="Escuchar vista previa del audio grabado"
+                  className="w-8 h-8 rounded-lg bg-[#00A8FF] text-[#04070D] flex items-center justify-center cursor-pointer shrink-0"
+                >
+                  {playingMsgId === 'pending-preview' ? (
+                    <Pause className="w-3.5 h-3.5 fill-current" />
+                  ) : (
+                    <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                  )}
+                </button>
                 <p className="text-xs font-semibold text-white">
-                  Audio listo para enviar ({formatSecondsClock(pendingAudio.durationSec)})
+                  Audio grabado ({formatSecondsClock(pendingAudio.durationSec)}
+                  {pendingAudio.sizeKb ? ` · ${pendingAudio.sizeKb} KB` : ''})
                 </p>
               </div>
               <button
                 type="button"
                 onClick={handleCancelRecording}
                 aria-label="Descartar audio grabado"
-                className="min-h-[34px] px-2.5 rounded-lg text-xs text-slate-300 hover:text-rose-400 flex items-center gap-1 cursor-pointer"
+                className="min-h-[32px] px-2.5 rounded-lg text-xs text-slate-300 hover:text-rose-400 flex items-center gap-1 cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 Descartar
@@ -640,28 +897,47 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
                 onChange={(e) => setAudioCaption(e.target.value)}
                 aria-label="Resumen opcional del audio"
                 placeholder="Resumen opcional del audio (ej. Duda sobre peso en Press Banca)"
-                className="flex-1 min-h-[42px] rounded-xl bg-[#06080D] border border-white/12 px-3 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00A8FF]"
+                className="flex-1 min-h-[40px] rounded-xl bg-[#06080D] border border-white/12 px-3 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00A8FF]"
               />
               <button
                 type="button"
-                onClick={handleSendPendingAudio}
-                className="min-h-[42px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                disabled={isSending}
+                onClick={() => void handleSendPendingAudio()}
+                className="min-h-[40px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-60"
               >
                 <Send className="w-3.5 h-3.5" />
-                Enviar audio
+                {isSending ? 'Enviando...' : 'Enviar audio'}
               </button>
             </div>
           </div>
         )}
 
         {formError && (
-          <p role="alert" className="text-xs text-rose-400 font-medium">
-            {formError}
-          </p>
+          <div
+            role="alert"
+            className="rounded-xl bg-rose-950/60 border border-rose-500/45 px-3 py-2 text-xs text-rose-200 flex items-start gap-2"
+          >
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <span>{formError}</span>
+          </div>
+        )}
+
+        {deliveryNotice && !formError && (
+          <div
+            role="status"
+            className={`rounded-xl px-3 py-2 text-xs flex items-center gap-2 border ${
+              deliveryNotice.tone === 'success'
+                ? 'bg-emerald-950/45 border-emerald-500/35 text-emerald-200'
+                : 'bg-amber-950/45 border-amber-500/35 text-amber-200'
+            }`}
+          >
+            <Check className="w-3.5 h-3.5 shrink-0" />
+            <span>{deliveryNotice.text}</span>
+          </div>
         )}
 
         {/* Text Message Form + Record Voice Button */}
-        <form onSubmit={handleSendText} className="flex flex-col sm:flex-row gap-2.5">
+        <form onSubmit={(e) => void handleSendText(e)} className="flex flex-col sm:flex-row gap-2">
           <input
             type="text"
             value={draftText}
@@ -673,32 +949,34 @@ export const CoachMessageThread: React.FC<CoachMessageThreadProps> = ({
             }
             placeholder={
               viewerRole === 'member'
-                ? `Escribe a Coach ${coach.name} para pedir rutina o consultar una duda...`
-                : `Escribe a ${memberName} o graba un audio de seguimiento...`
+                ? `Escribe a Coach ${coach.name} o graba audio...`
+                : `Responder a ${memberName} por texto o audio...`
             }
-            className="flex-1 min-h-[46px] rounded-xl bg-[#06080D] border border-white/12 px-3.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00A8FF]"
+            className="flex-1 min-h-[44px] rounded-xl bg-[#06080D] border border-white/12 px-3.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00A8FF]"
           />
 
           <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={isRecording ? handleStopRecording : handleStartRecording}
-              className={`min-h-[46px] px-3.5 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap ${
+              disabled={isSending}
+              onClick={isRecording ? handleStopRecording : () => void handleStartRecording()}
+              className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-60 ${
                 isRecording
                   ? 'bg-rose-600 hover:bg-rose-500 text-white'
                   : 'bg-[#131B28] hover:border-[#00A8FF] border border-white/12 text-slate-100'
               }`}
             >
               <Mic className="w-4 h-4 text-[#00A8FF]" />
-              {isRecording ? 'Parar' : 'Grabar audio'}
+              {isRecording ? 'Parar' : 'Audio'}
             </button>
 
             <button
               type="submit"
-              className="flex-1 sm:flex-initial min-h-[46px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap"
+              disabled={isSending}
+              className="flex-1 sm:flex-initial min-h-[44px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-60"
             >
               <Send className="w-4 h-4" />
-              Enviar mensaje
+              {isSending ? 'Enviando...' : 'Enviar'}
             </button>
           </div>
         </form>
