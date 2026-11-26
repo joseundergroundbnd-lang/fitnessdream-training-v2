@@ -130,6 +130,7 @@ import {
   buildActiveExercisesFromCoachRoutine,
   filterRoutinesForMember,
 } from './utils/routineBuilder';
+import { isPendingLocalWalkIn, resolveGoogleSyncMemberName } from './utils/memberSync';
 
 const STORAGE_KEY = 'fitnessdreams_app_state_v5';
 const PREVIOUS_STORAGE_KEY_V4 = 'fitnessdreams_app_state_v4';
@@ -303,9 +304,16 @@ export default function App() {
   const messagesHydratedRef = useRef<boolean>(false);
   const seenLiveRoutineIdsRef = useRef<Set<string>>(new Set());
   const routinesHydratedRef = useRef<boolean>(false);
+  const autoCreatedSelfUidRef = useRef<string | null>(null);
+  const syncingWalkInIdsRef = useRef<Set<string>>(new Set());
+  const profileRef = useRef<MemberProfile>(state.profile);
   const [localDemoFeeOverrides, setLocalDemoFeeOverrides] = useState<Record<string, FeeStatus>>(
     () => (INITIAL_CLUB_MEMBERS[0] ? { [INITIAL_CLUB_MEMBERS[0].id]: 'pendiente' } : {})
   );
+
+  useEffect(() => {
+    profileRef.current = state.profile;
+  }, [state.profile]);
 
   useEffect(() => {
     workspaceModeRef.current = workspaceMode;
@@ -353,19 +361,26 @@ export default function App() {
     void completeGoogleRedirectSignIn().then(async (redirectUser) => {
       if (!redirectUser) return;
       try {
+        const currentProfile = profileRef.current;
+        const resolvedName = resolveGoogleSyncMemberName({
+          profileName: currentProfile.name,
+          isRegistered: currentProfile.isRegistered,
+          googleDisplayName: redirectUser.displayName,
+          googleEmail: redirectUser.email,
+        });
         const synced = await upsertSignedInMemberProfile(redirectUser, {
-          name: redirectUser.displayName || 'Socio FitnessDreams',
-          email: redirectUser.email || '',
-          phone: '',
-          goal: 'Hipertrofia y Fuerza',
-          tier: 'Socio Fundador',
+          name: resolvedName,
+          email: redirectUser.email || currentProfile.email || '',
+          phone: currentProfile.phone || '',
+          goal: currentProfile.goal || 'Hipertrofia y Fuerza',
+          tier: currentProfile.tier || 'Socio Fundador',
         });
         setState((prev) => ({
           ...prev,
           profile: {
             ...prev.profile,
             memberId: synced.id,
-            name: prev.profile.isRegistered ? prev.profile.name : synced.name,
+            name: synced.name,
             email: redirectUser.email || prev.profile.email,
             founderNumber: synced.memberCode,
             feeStatus: synced.feeStatus,
@@ -373,8 +388,12 @@ export default function App() {
             monthlyFee: synced.monthlyFee,
           },
         }));
-      } catch {
-        // Handled by auth state listener
+      } catch (err) {
+        setAuthError(
+          err instanceof Error
+            ? err.message
+            : 'No se pudo sincronizar tu perfil de socio tras iniciar sesión con Google.'
+        );
       }
     });
 
@@ -404,10 +423,51 @@ export default function App() {
 
     const unsubs: Array<() => void> = [];
 
-    // 1. Sync current member's live fee status & memberCode
+    // 1. Sync current member's live fee status & memberCode (and auto-heal if /members/{uid} does not exist yet)
     unsubs.push(
       subscribeLiveMemberSelf(authUser.uid, (selfDoc) => {
-        if (!selfDoc) return;
+        if (!selfDoc) {
+          if (autoCreatedSelfUidRef.current === authUser.uid) return;
+          autoCreatedSelfUidRef.current = authUser.uid;
+          const currentProfile = profileRef.current;
+          const resolvedName = resolveGoogleSyncMemberName({
+            profileName: currentProfile.name,
+            isRegistered: currentProfile.isRegistered,
+            googleDisplayName: authUser.displayName,
+            googleEmail: authUser.email,
+          });
+          void upsertSignedInMemberProfile(authUser, {
+            name: resolvedName,
+            email: authUser.email || currentProfile.email || '',
+            phone: currentProfile.phone || '',
+            goal: currentProfile.goal || 'Hipertrofia y Fuerza',
+            tier: currentProfile.tier || 'Socio Fundador',
+          })
+            .then((created) => {
+              setState((prev) => ({
+                ...prev,
+                profile: {
+                  ...prev.profile,
+                  memberId: created.id,
+                  name: created.name,
+                  email: authUser.email || prev.profile.email,
+                  founderNumber: created.memberCode,
+                  feeStatus: created.feeStatus,
+                  tier: created.tier,
+                  monthlyFee: created.monthlyFee,
+                },
+              }));
+            })
+            .catch((err) => {
+              autoCreatedSelfUidRef.current = null;
+              setAuthError(
+                err instanceof Error
+                  ? err.message
+                  : 'No se pudo registrar tu ficha de socio en la nube.'
+              );
+            });
+          return;
+        }
         setState((prev) => ({
           ...prev,
           profile: {
@@ -509,7 +569,14 @@ export default function App() {
 
     // 3. Admin-only real members directory & authorized gym/coach accounts
     if (isLiveAdmin) {
-      unsubs.push(subscribeAllLiveMembers(setLiveMembers));
+      unsubs.push(
+        subscribeAllLiveMembers(setLiveMembers, (membersErr) => {
+          setAuthNotice({
+            tone: 'warning',
+            message: `Aviso al cargar socios de la nube: ${membersErr}`,
+          });
+        })
+      );
       unsubs.push(subscribeAuthorizedStaff(setLiveAuthorizedStaff));
     }
 
@@ -517,6 +584,63 @@ export default function App() {
       unsubs.forEach((fn) => fn());
     };
   }, [authUser, isLiveAdmin]);
+
+  // Auto-upload any locally created walk-in members (local_pilot_*) to Firestore once an authorized gym/coach account connects
+  useEffect(() => {
+    if (!authUser || !isLiveAdmin) return;
+    const pendingWalkIns = state.walkInMembers.filter(
+      (m) => isPendingLocalWalkIn(m) && !syncingWalkInIdsRef.current.has(m.id)
+    );
+    if (pendingWalkIns.length === 0) return;
+
+    pendingWalkIns.forEach((m) => syncingWalkInIdsRef.current.add(m.id));
+    let cancelled = false;
+
+    void (async () => {
+      const syncedIds: string[] = [];
+      for (const localMember of pendingWalkIns) {
+        try {
+          await createWalkInPilotMember({
+            name: localMember.name,
+            phone: localMember.phone || '600 000 000',
+            email: localMember.email || '',
+            tier: localMember.tier,
+            feeStatus: localMember.feeStatus,
+            assignedCoach: localMember.assignedCoach || 'Javi Busta',
+          });
+          syncedIds.push(localMember.id);
+        } catch (err) {
+          syncingWalkInIdsRef.current.delete(localMember.id);
+          if (!cancelled) {
+            setAuthNotice({
+              tone: 'warning',
+              message: `No se pudo subir automáticamente a «${localMember.name}»: ${
+                err instanceof Error ? err.message : 'revisa tu conexión'
+              }`,
+            });
+          }
+        }
+      }
+      if (!cancelled && syncedIds.length > 0) {
+        const syncedSet = new Set(syncedIds);
+        setState((prev) => ({
+          ...prev,
+          walkInMembers: prev.walkInMembers.filter((m) => !syncedSet.has(m.id)),
+        }));
+        setAuthNotice({
+          tone: 'success',
+          message:
+            syncedIds.length === 1
+              ? 'Se ha sincronizado 1 socio local en la nube. Ya aparece en Coach Javi y Recepción en todos los dispositivos.'
+              : `Se han sincronizado ${syncedIds.length} socios locales en la nube. Ya aparecen en Coach Javi y Recepción en todos los dispositivos.`,
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, isLiveAdmin, state.walkInMembers]);
 
   // Local demo members list for offline/instant preview of Reception & Turnstile Scanner
   const localDemoMembers = useMemo<LiveGymMember[]>(() => {
@@ -747,10 +871,14 @@ export default function App() {
       setAuthUser(user);
       const adminFlag = await checkIsLiveAdmin(user);
       setIsLiveAdmin(adminFlag);
+      const resolvedName = resolveGoogleSyncMemberName({
+        profileName: state.profile.name,
+        isRegistered: state.profile.isRegistered,
+        googleDisplayName: user.displayName,
+        googleEmail: user.email,
+      });
       const synced = await upsertSignedInMemberProfile(user, {
-        name: state.profile.isRegistered
-          ? state.profile.name
-          : user.displayName || 'Socio FitnessDreams',
+        name: resolvedName,
         email: user.email || state.profile.email,
         phone: state.profile.phone,
         goal: state.profile.goal,
@@ -936,7 +1064,7 @@ export default function App() {
     (m) => m.outreachStatus === 'pendiente'
   ).length;
 
-  const handleCompleteRegistration = (data: {
+  const handleCompleteRegistration = async (data: {
     name: string;
     email: string;
     phone: string;
@@ -985,13 +1113,14 @@ export default function App() {
     setActiveTab('inicio');
 
     if (authUser) {
-      void upsertSignedInMemberProfile(authUser, {
-        name: data.name,
-        email: data.email,
-        phone: data.phone,
-        goal: data.goal,
-        tier: data.tier,
-      }).then((synced) => {
+      try {
+        const synced = await upsertSignedInMemberProfile(authUser, {
+          name: data.name,
+          email: data.email,
+          phone: data.phone,
+          goal: data.goal,
+          tier: data.tier,
+        });
         setState((prev) => ({
           ...prev,
           profile: {
@@ -1001,6 +1130,21 @@ export default function App() {
             feeStatus: synced.feeStatus,
           },
         }));
+        setAuthNotice({
+          tone: 'success',
+          message: `Socio «${data.name}» guardado EN LA NUBE (${synced.memberCode}). Ya aparece automáticamente en la página de Coach Javi y en Recepción.`,
+        });
+      } catch (err) {
+        setAuthError(
+          err instanceof Error
+            ? err.message
+            : 'Tu perfil se guardó en este dispositivo, pero falló la sincronización con la nube.'
+        );
+      }
+    } else {
+      setAuthNotice({
+        tone: 'warning',
+        message: `Perfil «${data.name}» guardado solo en este dispositivo. Pulsa «Sin conectar a Google · Conectar» arriba para subirlo a la nube y que aparezca en Coach Javi.`,
       });
     }
   };
@@ -1659,6 +1803,7 @@ export default function App() {
           initialProfile={state.profile}
           authUser={authUser}
           onSignInGoogle={handleSignInGoogle}
+          onSignOutGoogle={handleSignOutGoogle}
           onCompleteRegistration={handleCompleteRegistration}
           onQuickDemoEnter={handleQuickDemoEnter}
           onEnterOwnerPanel={handleEnterOwnerPanelFromStart}
@@ -2028,6 +2173,7 @@ export default function App() {
             onRequestNotificationPermission={handleRequestNotificationPermission}
             onTestNotification={handleTestNotification}
             onSendCoachRoutine={handleSendCoachRoutine}
+            onCreateWalkInMember={handleCreateWalkInMember}
             onPreviewRoutinesInMemberView={() => {
               setWorkspaceMode('socio');
               setActiveTab('entreno');

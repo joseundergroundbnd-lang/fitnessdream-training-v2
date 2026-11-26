@@ -130,7 +130,9 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
   const [newTier, setNewTier] = useState<'Socio Fundador' | 'Socio Club'>('Socio Fundador');
   const [newFeeStatus, setNewFeeStatus] = useState<FeeStatus>('al-dia');
   const [creating, setCreating] = useState(false);
-  const [formNotice, setFormNotice] = useState<string | null>(null);
+  const [formNotice, setFormNotice] = useState<{ tone: 'ok' | 'warn' | 'err'; text: string } | null>(
+    null
+  );
   const [copiedKey, setCopiedKey] = useState<'scanner' | 'client' | null>(null);
   const [previewQrMember, setPreviewQrMember] = useState<LiveGymMember | null>(null);
   const [checkedSteps, setCheckedSteps] = useState<Record<string, boolean>>({});
@@ -169,14 +171,18 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
   const handleAddWalkIn = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) {
-      setFormNotice('Escribe al menos el nombre del cliente de prueba.');
+      setFormNotice({
+        tone: 'err',
+        text: 'Escribe al menos el nombre del socio para darlo de alta.',
+      });
       return;
     }
     setCreating(true);
     setFormNotice(null);
     try {
+      const createdName = newName.trim();
       const result = await onCreateWalkInMember({
-        name: newName.trim(),
+        name: createdName,
         phone: newPhone.trim() || '600 000 000',
         email: newEmail.trim(),
         tier: newTier,
@@ -185,14 +191,28 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
       });
       setFormNotice(
         result.savedToCloud
-          ? `Cliente «${newName.trim()}» guardado EN LA NUBE (${
-              newFeeStatus === 'al-dia' ? 'Al día' : 'Cuota pendiente'
-            }). Ya aparece automáticamente en el Portal de Coach Javi y en todos los dispositivos.`
-          : `Cliente «${newName.trim()}» guardado en este ordenador (Modo local). Ya aparece en el Portal de Coach Javi de este navegador. Conecta Google arriba para sincronizarlo también con otros móviles.`
+          ? {
+              tone: 'ok',
+              text: `Socio «${createdName}» (${result.member.memberCode}) guardado EN LA NUBE (${
+                newFeeStatus === 'al-dia' ? 'Al día' : 'Cuota pendiente'
+              }). Ya aparece automáticamente en la página de Coach Javi y en todos los dispositivos.`,
+            }
+          : {
+              tone: 'warn',
+              text: `Socio «${createdName}» guardado en este ordenador (Modo local). Conecta Google arriba y se subirá automáticamente a la nube para Coach Javi.`,
+            }
       );
       setNewName('');
       setNewPhone('');
       setNewEmail('');
+    } catch (err) {
+      setFormNotice({
+        tone: 'err',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'No se pudo guardar el socio en la nube. Revisa tu conexión e inténtalo de nuevo.',
+      });
     } finally {
       setCreating(false);
     }
@@ -598,8 +618,17 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
               </div>
 
               {formNotice && (
-                <p role="status" className="text-xs text-[#33C1FF]">
-                  {formNotice}
+                <p
+                  role={formNotice.tone === 'err' ? 'alert' : 'status'}
+                  className={`text-xs font-medium ${
+                    formNotice.tone === 'err'
+                      ? 'text-rose-300'
+                      : formNotice.tone === 'ok'
+                        ? 'text-emerald-300'
+                        : 'text-amber-300'
+                  }`}
+                >
+                  {formNotice.text}
                 </p>
               )}
             </form>

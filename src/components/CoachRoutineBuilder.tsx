@@ -20,6 +20,7 @@ import {
   Send,
   Trash2,
   UserCheck,
+  UserPlus,
   Users,
   X,
 } from 'lucide-react';
@@ -33,6 +34,7 @@ import type {
   CoachRoutineCardioBlock,
   CoachRoutineExercise,
   DirectMessage,
+  FeeStatus,
   MuscleGroup,
   PyramidPreset,
   RepSchemeMode,
@@ -60,6 +62,7 @@ import {
   resolveDirectPublicUrl,
 } from '../utils/pwaUtils';
 import { buildCoachChatContacts } from '../utils/messaging';
+import { mergeCoachDirectoryMembers } from '../utils/memberSync';
 import type { NotificationPermissionState } from '../utils/notifications';
 import { CoachMessageThread, type SendDirectMessageResult } from './CoachMessageThread';
 import type { PresentationKitTab } from './PresentationKitModal';
@@ -84,6 +87,14 @@ interface CoachRoutineBuilderProps {
   onRequestNotificationPermission?: () => Promise<void>;
   onTestNotification?: () => Promise<void>;
   onSendCoachRoutine: (routine: CoachRoutine) => void;
+  onCreateWalkInMember?: (input: {
+    name: string;
+    phone: string;
+    email?: string;
+    tier: 'Socio Fundador' | 'Socio Club';
+    feeStatus: FeeStatus;
+    assignedCoach: string;
+  }) => Promise<{ savedToCloud: boolean; member: LiveGymMember }>;
   onPreviewRoutinesInMemberView: () => void;
   onOpenPresentationKit: (tab: PresentationKitTab) => void;
   isStandaloneCoachPortal?: boolean;
@@ -126,25 +137,31 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
   onRequestNotificationPermission,
   onTestNotification,
   onSendCoachRoutine,
+  onCreateWalkInMember,
   onPreviewRoutinesInMemberView,
   onOpenPresentationKit,
   isStandaloneCoachPortal = false,
 }) => {
   const [portalSection, setPortalSection] = useState<'rutinas' | 'chat'>('rutinas');
 
+  // Inline "+ Nuevo socio" quick-add right inside Coach Javi's page
+  const [showQuickAddMember, setShowQuickAddMember] = useState(false);
+  const [quickMemberName, setQuickMemberName] = useState('');
+  const [quickMemberPhone, setQuickMemberPhone] = useState('');
+  const [quickMemberTier, setQuickMemberTier] = useState<'Socio Fundador' | 'Socio Club'>(
+    'Socio Fundador'
+  );
+  const [quickMemberSaving, setQuickMemberSaving] = useState(false);
+  const [quickMemberNotice, setQuickMemberNotice] = useState<{
+    tone: 'ok' | 'warn' | 'err';
+    text: string;
+  } | null>(null);
+
   // Unified searchable member database: real Firestore members first, then reception walk-ins & demo fallback without duplicates
-  const allDirectoryMembers = useMemo(() => {
-    const map = new Map<string, LiveGymMember & { isCloud: boolean }>();
-    for (const m of liveMembers) {
-      map.set(m.id, { ...m, isCloud: true });
-    }
-    for (const m of localDemoMembers) {
-      if (!map.has(m.id)) {
-        map.set(m.id, { ...m, isCloud: false });
-      }
-    }
-    return Array.from(map.values());
-  }, [liveMembers, localDemoMembers]);
+  const allDirectoryMembers = useMemo(
+    () => mergeCoachDirectoryMembers(liveMembers, localDemoMembers),
+    [liveMembers, localDemoMembers]
+  );
 
   // Unified chat contacts: combines directory members AND any real member who sent a message (e.g. Unai Martínez)
   const chatContacts = useMemo(
@@ -219,6 +236,57 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
       allDirectoryMembers.some((m) => m.id === recipientMemberId)
     ) {
       setSelectedRecipientId(recipientMemberId);
+    }
+  };
+
+  const handleQuickAddMember = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onCreateWalkInMember) return;
+    const cleanName = quickMemberName.trim();
+    if (!cleanName) {
+      setQuickMemberNotice({
+        tone: 'err',
+        text: 'Escribe el nombre y apellidos del nuevo socio.',
+      });
+      return;
+    }
+    setQuickMemberSaving(true);
+    setQuickMemberNotice(null);
+    try {
+      const res = await onCreateWalkInMember({
+        name: cleanName,
+        phone: quickMemberPhone.trim() || '600 000 000',
+        tier: quickMemberTier,
+        feeStatus: 'al-dia',
+        assignedCoach: activeCoach.name,
+      });
+      setSelectedRecipientId(res.member.id);
+      setSelectedChatThreadId(res.member.uid);
+      setMemberSearch('');
+      setQuickMemberName('');
+      setQuickMemberPhone('');
+      setShowQuickAddMember(false);
+      setQuickMemberNotice(
+        res.savedToCloud
+          ? {
+              tone: 'ok',
+              text: `Socio «${res.member.name}» (${res.member.memberCode}) creado EN LA NUBE y seleccionado para enviar rutina o chatear.`,
+            }
+          : {
+              tone: 'warn',
+              text: `Socio «${res.member.name}» (${res.member.memberCode}) creado en modo local y seleccionado. Conecta Google arriba para sincronizarlo en la nube con otros dispositivos.`,
+            }
+      );
+    } catch (err) {
+      setQuickMemberNotice({
+        tone: 'err',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'No se pudo dar de alta al nuevo socio. Revisa tu conexión.',
+      });
+    } finally {
+      setQuickMemberSaving(false);
     }
   };
 
@@ -947,11 +1015,96 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
                   ¿A qué socio le envías esta rutina?
                 </h3>
               </div>
-              <span className="text-xs font-mono tabular-nums text-slate-400">
-                {realMembersCount > 0 ? `${realMembersCount} reales/alta · ` : ''}
-                {filteredDirectoryMembers.length} de {allDirectoryMembers.length} socios
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-mono tabular-nums text-slate-400">
+                  {realMembersCount > 0 ? `${realMembersCount} reales/alta · ` : ''}
+                  {filteredDirectoryMembers.length} de {allDirectoryMembers.length} socios
+                </span>
+                {onCreateWalkInMember && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowQuickAddMember((v) => !v);
+                      setQuickMemberNotice(null);
+                    }}
+                    className="min-h-[36px] px-3 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>{showQuickAddMember ? 'Cerrar alta' : '+ Nuevo socio'}</span>
+                  </button>
+                )}
+              </div>
             </div>
+
+            {showQuickAddMember && onCreateWalkInMember && (
+              <form
+                onSubmit={(e) => void handleQuickAddMember(e)}
+                className="rounded-xl bg-[#06080D] border border-[#00A8FF]/45 p-3.5 space-y-2.5"
+              >
+                <p className="text-xs font-semibold text-[#33C1FF]">
+                  Alta rápida de nuevo socio directamente desde el Portal Coaches
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <input
+                    type="text"
+                    value={quickMemberName}
+                    onChange={(e) => setQuickMemberName(e.target.value)}
+                    placeholder="Nombre y apellidos (ej. Marta Sánchez)"
+                    aria-label="Nombre del nuevo socio"
+                    className="min-h-[40px] rounded-lg bg-[#0D121B] border border-white/12 px-3 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00A8FF]"
+                  />
+                  <input
+                    type="tel"
+                    value={quickMemberPhone}
+                    onChange={(e) => setQuickMemberPhone(e.target.value)}
+                    placeholder="Teléfono (ej. 611 223 344)"
+                    aria-label="Teléfono del nuevo socio"
+                    className="min-h-[40px] rounded-lg bg-[#0D121B] border border-white/12 px-3 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00A8FF]"
+                  />
+                  <select
+                    value={quickMemberTier}
+                    onChange={(e) =>
+                      setQuickMemberTier(e.target.value as 'Socio Fundador' | 'Socio Club')
+                    }
+                    aria-label="Tarifa del nuevo socio"
+                    className="min-h-[40px] rounded-lg bg-[#0D121B] border border-white/12 px-2.5 text-xs text-white focus:outline-none focus:border-[#00A8FF]"
+                  >
+                    <option value="Socio Fundador">Socio Fundador (34,90 €)</option>
+                    <option value="Socio Club">Socio Club (46,90 €)</option>
+                  </select>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-slate-400">
+                    {authUser && isLiveAdmin
+                      ? 'Se guardará EN LA NUBE y aparecerá al instante en todos los dispositivos.'
+                      : 'Modo local hasta que conectes Google arriba.'}
+                  </span>
+                  <button
+                    type="submit"
+                    disabled={quickMemberSaving}
+                    className="min-h-[38px] px-3.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-[#04070D] text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>{quickMemberSaving ? 'Guardando...' : 'Guardar nuevo socio'}</span>
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {quickMemberNotice && (
+              <p
+                role={quickMemberNotice.tone === 'err' ? 'alert' : 'status'}
+                className={`text-xs font-medium rounded-lg px-3 py-2 border ${
+                  quickMemberNotice.tone === 'err'
+                    ? 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+                    : quickMemberNotice.tone === 'ok'
+                      ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                      : 'bg-amber-950/40 border-amber-500/40 text-amber-200'
+                }`}
+              >
+                {quickMemberNotice.text}
+              </p>
+            )}
 
             {/* Search bar */}
             <div className="relative">

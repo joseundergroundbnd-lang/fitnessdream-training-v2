@@ -23,6 +23,7 @@ interface RegistrationViewProps {
   initialProfile: MemberProfile;
   authUser?: User | null;
   onSignInGoogle?: () => Promise<void>;
+  onSignOutGoogle?: () => Promise<void>;
   onCompleteRegistration: (data: {
     name: string;
     email: string;
@@ -30,7 +31,7 @@ interface RegistrationViewProps {
     goal: string;
     tier: 'Socio Fundador' | 'Socio Club';
     avatarUrl: string;
-  }) => void;
+  }) => void | Promise<void>;
   onQuickDemoEnter: () => void;
   onEnterOwnerPanel?: () => void;
   onOpenTurnstileScanner?: () => void;
@@ -48,6 +49,7 @@ export const RegistrationView: React.FC<RegistrationViewProps> = ({
   initialProfile,
   authUser,
   onSignInGoogle,
+  onSignOutGoogle,
   onCompleteRegistration,
   onQuickDemoEnter,
   onEnterOwnerPanel,
@@ -358,26 +360,53 @@ export const RegistrationView: React.FC<RegistrationViewProps> = ({
 
             {/* Real Multi-Device Google Login Bar */}
             {onSignInGoogle && (
-              <div className="rounded-xl bg-[#06080D] border border-[#00A8FF]/40 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="space-y-0.5 min-w-0">
-                  <p className="text-xs font-bold text-white">
-                    {authUser
-                      ? `Conectado con Google: ${authUser.email}`
-                      : 'Acceso Real de Socio (Sincronizado con el Torno)'}
+              <div
+                className={`rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border ${
+                  authUser
+                    ? 'bg-emerald-950/35 border-emerald-500/45'
+                    : 'bg-amber-950/25 border-amber-500/45'
+                }`}
+              >
+                <div className="space-y-1 min-w-0">
+                  <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        authUser ? 'bg-emerald-400' : 'bg-amber-400'
+                      }`}
+                    />
+                    <span className="truncate">
+                      {authUser
+                        ? `Conectado con Google: ${authUser.email}`
+                        : 'Paso 1 (para aparecer en Coach Javi): entra con Google'}
+                    </span>
                   </p>
-                  <p className="text-[11px] text-slate-400">
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
                     {authUser
-                      ? 'Completa tus datos abajo para activar tu Pase QR real en el gimnasio.'
-                      : 'Inicia sesión con tu cuenta de Google para conectar tu Pase QR con recepción.'}
+                      ? 'Al pulsar «Registrarme» se guardará en la nube. Si estás dando de alta a OTRO socio distinto desde este dispositivo, cambia primero de cuenta Google para no sobrescribir tu ficha.'
+                      : 'Si rellenas el formulario sin entrar con Google, solo se guardará en este dispositivo y NO aparecerás en la página de Coach Javi.'}
                   </p>
                 </div>
-                {!authUser && (
+                {authUser ? (
+                  onSignOutGoogle && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void onSignOutGoogle().then(() => {
+                          setName('');
+                          setEmail('');
+                          setPhone('');
+                        });
+                      }}
+                      className="min-h-[38px] px-3 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-semibold whitespace-nowrap cursor-pointer shrink-0"
+                    >
+                      Cambiar cuenta Google
+                    </button>
+                  )
+                ) : (
                   <button
                     type="button"
                     onClick={() => {
-                      void onSignInGoogle().then(() => {
-                        // Auth state will sync name/email automatically
-                      });
+                      void onSignInGoogle();
                     }}
                     className="min-h-[40px] px-3.5 rounded-lg bg-white hover:bg-slate-100 text-[#04070D] text-xs font-bold whitespace-nowrap cursor-pointer shrink-0"
                   >

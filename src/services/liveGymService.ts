@@ -366,7 +366,14 @@ export async function upsertSignedInMemberProfile(
       phone: cleanPhone,
     };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, memberPath);
+    console.error(`[FitnessDreams] Error guardando socio en ${memberPath}:`, error);
+    const rawMsg = error instanceof Error ? error.message : String(error);
+    if (rawMsg.toLowerCase().includes('permission')) {
+      throw new Error(
+        'Permiso denegado al guardar tu perfil en la nube. Vuelve a iniciar sesión con una cuenta de Google verificada e inténtalo de nuevo.'
+      );
+    }
+    throw new Error(`No se pudo guardar el socio en la nube (${rawMsg}). Revisa tu conexión e inténtalo de nuevo.`);
   }
 }
 
@@ -442,7 +449,14 @@ export async function createWalkInPilotMember(input: {
       phone: cleanPhone,
     };
   } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `members/${memberId}`);
+    console.error(`[FitnessDreams] Error creando socio walk-in en members/${memberId}:`, error);
+    const rawMsg = error instanceof Error ? error.message : String(error);
+    if (rawMsg.toLowerCase().includes('permission')) {
+      throw new Error(
+        'Permiso denegado en la nube: conecta una cuenta de Google autorizada del gimnasio/coach para dar de alta socios en la nube.'
+      );
+    }
+    throw new Error(`No se pudo guardar el nuevo socio en la nube (${rawMsg}). Revisa tu conexión e inténtalo de nuevo.`);
   }
 }
 
@@ -841,37 +855,54 @@ export function subscribeLiveMemberSelf(
   );
 }
 
-export function subscribeAllLiveMembers(onData: (members: LiveGymMember[]) => void): Unsubscribe {
+export function subscribeAllLiveMembers(
+  onData: (members: LiveGymMember[]) => void,
+  onError?: (errorMessage: string) => void
+): Unsubscribe {
   const path = 'members';
-  const q = query(collection(db, path), orderBy('updatedAt', 'desc'), limit(100));
+  const q = query(collection(db, path), limit(200));
   return onSnapshot(
     q,
     (snapshot) => {
-      const list: LiveGymMember[] = snapshot.docs.map((snap) => {
-        const d = snap.data();
-        return {
-          id: snap.id,
-          uid: String(d.uid ?? snap.id),
-          memberCode: String(d.memberCode ?? 'FD-0001'),
-          name: String(d.name ?? 'Socio'),
-          tier: d.tier === 'Socio Club' ? 'Socio Club' : 'Socio Fundador',
-          goal: String(d.goal ?? ''),
-          feeStatus: normalizeFeeStatus(d.feeStatus),
-          monthlyFee: Number(d.monthlyFee ?? 34.9),
-          streakDays: Number(d.streakDays ?? 0),
-          totalCheckIns: Number(d.totalCheckIns ?? 0),
-          lastCheckInLabel: String(d.lastCheckInLabel ?? ''),
-          daysSinceLastVisit: Number(d.daysSinceLastVisit ?? 0),
-          outreachStatus: (d.outreachStatus as LiveGymMember['outreachStatus']) ?? 'pendiente',
-          lastOutreachNote: typeof d.lastOutreachNote === 'string' ? d.lastOutreachNote : undefined,
-          assignedCoach: String(d.assignedCoach ?? 'Javi Busta'),
-          isRealMember: Boolean(d.isRealMember ?? true),
-        };
-      });
+      const list = snapshot.docs
+        .map((snap) => {
+          const d = snap.data();
+          const updatedTs = d.updatedAt
+            ? formatTimestampLabel(d.updatedAt).ms
+            : d.createdAt
+              ? formatTimestampLabel(d.createdAt).ms
+              : 0;
+          const member: LiveGymMember = {
+            id: snap.id,
+            uid: String(d.uid ?? snap.id),
+            memberCode: String(d.memberCode ?? 'FD-0001'),
+            name: String(d.name ?? 'Socio'),
+            tier: d.tier === 'Socio Club' ? 'Socio Club' : 'Socio Fundador',
+            goal: String(d.goal ?? ''),
+            feeStatus: normalizeFeeStatus(d.feeStatus),
+            monthlyFee: Number(d.monthlyFee ?? 34.9),
+            streakDays: Number(d.streakDays ?? 0),
+            totalCheckIns: Number(d.totalCheckIns ?? 0),
+            lastCheckInLabel: String(d.lastCheckInLabel ?? ''),
+            daysSinceLastVisit: Number(d.daysSinceLastVisit ?? 0),
+            outreachStatus: (d.outreachStatus as LiveGymMember['outreachStatus']) ?? 'pendiente',
+            lastOutreachNote: typeof d.lastOutreachNote === 'string' ? d.lastOutreachNote : undefined,
+            assignedCoach: String(d.assignedCoach ?? 'Javi Busta'),
+            isRealMember: Boolean(d.isRealMember ?? true),
+          };
+          return { member, sortMs: updatedTs };
+        })
+        .sort((a, b) => b.sortMs - a.sortMs)
+        .map((entry) => entry.member);
       onData(list);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      console.error('[FitnessDreams] Error suscripción directorio de socios:', error);
+      onError?.(
+        error instanceof Error
+          ? error.message
+          : 'No se pudo sincronizar la base de datos de socios desde la nube.'
+      );
     }
   );
 }

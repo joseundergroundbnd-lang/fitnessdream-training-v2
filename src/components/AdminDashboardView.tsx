@@ -1415,6 +1415,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           onRequestNotificationPermission={onRequestNotificationPermission}
           onTestNotification={onTestNotification}
           onSendCoachRoutine={onSendCoachRoutine}
+          onCreateWalkInMember={onCreateWalkInMember}
           onPreviewRoutinesInMemberView={onPreviewRoutinesInMemberView}
           onOpenPresentationKit={onOpenPresentationKit}
         />
