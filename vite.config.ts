@@ -13,6 +13,11 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: [
+          'favicon.ico',
+          'icon-pedestal-180.png',
+          'icon-pedestal-192.png',
+          'icon-pedestal-512.png',
+          'icon-pedestal-maskable-512.png',
           'apple-touch-icon.png',
           'pwa-192x192.png',
           'pwa-512x512.png',
@@ -32,19 +37,19 @@ export default defineConfig(() => {
           scope: '/',
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: '/icon-pedestal-192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: '/icon-pedestal-512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-maskable-512x512.png',
+              src: '/icon-pedestal-maskable-512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
