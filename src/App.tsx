@@ -18,6 +18,7 @@ import { AdminDashboardView } from './components/AdminDashboardView';
 import { BrandLogo } from './components/BrandLogo';
 import { ClassesView } from './components/ClassesView';
 import { ClubView } from './components/ClubView';
+import { CoachRoutineBuilder } from './components/CoachRoutineBuilder';
 import { GymMapView } from './components/GymMapView';
 import { HomeView } from './components/HomeView';
 import {
@@ -94,6 +95,10 @@ import {
   transitionFriendshipStatus,
   transitionPeerChallengeStatus,
 } from './utils/gymLogic';
+import {
+  buildActiveExercisesFromCoachRoutine,
+  filterRoutinesForMember,
+} from './utils/routineBuilder';
 
 const STORAGE_KEY = 'fitnessdreams_app_state_v5';
 const PREVIOUS_STORAGE_KEY_V4 = 'fitnessdreams_app_state_v4';
@@ -124,19 +129,36 @@ function getInitialWorkspaceMode(): AppWorkspaceMode {
   const mode = new URLSearchParams(window.location.search).get('mode');
   if (mode === 'lector') return 'lector';
   if (mode === 'direccion') return 'direccion';
+  if (mode === 'coach' || mode === 'coach-javi' || mode === 'coach-joel') return 'coach';
   return 'socio';
+}
+
+function getInitialCoachIdFromUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  const mode = new URLSearchParams(window.location.search).get('mode');
+  if (mode === 'coach-javi') return 'coach-javi';
+  if (mode === 'coach-joel') return 'coach-joel';
+  const coachParam = new URLSearchParams(window.location.search).get('coach');
+  if (coachParam === 'javi' || coachParam === 'coach-javi') return 'coach-javi';
+  if (coachParam === 'joel' || coachParam === 'coach-joel') return 'coach-joel';
+  return null;
 }
 
 function loadInitialState(): PersistedState {
   const params =
     typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+  const modeParam = params?.get('mode');
+  const urlCoachId = getInitialCoachIdFromUrl();
   const autostart =
     params?.get('autostart') === '1' ||
-    params?.get('mode') === 'direccion' ||
-    params?.get('mode') === 'lector';
+    modeParam === 'direccion' ||
+    modeParam === 'lector' ||
+    modeParam === 'coach' ||
+    modeParam === 'coach-javi' ||
+    modeParam === 'coach-joel';
 
   const defaults: PersistedState = {
-    activeCoachId: COACH_TEAM[0].id,
+    activeCoachId: urlCoachId ?? COACH_TEAM[0].id,
     profile: {
       ...INITIAL_MEMBER_PROFILE,
       isRegistered: autostart ? true : INITIAL_MEMBER_PROFILE.isRegistered,
@@ -180,7 +202,7 @@ function loadInitialState(): PersistedState {
     return {
       ...defaults,
       ...parsed,
-      activeCoachId: parsed.activeCoachId ?? defaults.activeCoachId,
+      activeCoachId: urlCoachId ?? parsed.activeCoachId ?? defaults.activeCoachId,
       coachRoutines: mergedRoutines,
       profile: mergedProfile,
       directMessages: parsed.directMessages ?? defaults.directMessages,
@@ -333,11 +355,34 @@ export default function App() {
     return [...localWalkInMembers, selfMember, ...seeded];
   }, [localDemoFeeOverrides, localWalkInMembers, state.clubMembers, state.profile]);
 
-  // Merge live Firestore routines & messages with local seed items
+  // Merge live Firestore routines with local seed items (preserving full exercises, pyramids, cardio & exclusive recipient)
   const mergedCoachRoutines = useMemo<CoachRoutine[]>(() => {
     if (liveRoutines.length === 0) return state.coachRoutines;
     const mappedLive: CoachRoutine[] = liveRoutines.map((lr) => {
       const matchedCoach = COACH_TEAM.find((c) => c.id === lr.coachId) ?? COACH_TEAM[0];
+      const hydratedExercises =
+        lr.exercises && lr.exercises.length > 0
+          ? lr.exercises
+          : lr.machineCodes.map((code) => {
+              const machine = getMachineByCode(code);
+              const isCardio = machine?.trackingMode === 'cardio';
+              return {
+                machineCode: code,
+                exerciseName: machine?.name ?? code,
+                muscleGroup: machine?.muscleGroup,
+                equipmentType: machine?.category,
+                targetSets: isCardio ? 1 : 4,
+                targetReps: isCardio ? '15 min' : '10-12',
+                repScheme: 'fijas' as const,
+                suggestedWeightKg: isCardio
+                  ? 8
+                  : machine?.category === 'Mancuernas y Barra'
+                    ? 18
+                    : 55,
+                restSeconds: isCardio ? 60 : 90,
+              };
+            });
+
       return {
         id: lr.id,
         title: lr.title,
@@ -347,26 +392,38 @@ export default function App() {
         coachName: lr.coachName,
         coachRole: lr.coachRole,
         coachAvatar: matchedCoach.avatarUrl,
+        targetMemberId: lr.targetMemberId,
+        targetMemberName: lr.targetMemberName,
+        targetMemberCode: lr.targetMemberCode,
         goal: lr.goal,
         sentAt: lr.createdAtLabel,
         isNew: true,
         coachMessage: lr.coachMessage,
-        exercises: lr.machineCodes.map((code) => {
-          const machine = getMachineByCode(code);
-          const isCardio = machine?.trackingMode === 'cardio';
-          return {
-            machineCode: code,
-            targetSets: isCardio ? 1 : 4,
-            targetReps: isCardio ? '15 min' : '10-12',
-            suggestedWeightKg: isCardio ? 8 : machine?.category === 'Mancuernas' ? 18 : 55,
-            restSeconds: isCardio ? 60 : 90,
-          };
-        }),
+        exercises: hydratedExercises,
+        cardioBlock: lr.cardioBlock,
       };
     });
     const liveIds = new Set(mappedLive.map((r) => r.id));
     return [...mappedLive, ...state.coachRoutines.filter((r) => !liveIds.has(r.id))];
   }, [liveRoutines, state.coachRoutines]);
+
+  // Routines exclusively visible to the active member (only general 'all' + routines addressed specifically to this member)
+  const memberVisibleCoachRoutines = useMemo(
+    () =>
+      filterRoutinesForMember(mergedCoachRoutines, {
+        uid: authUser?.uid ?? null,
+        memberId: state.profile.memberId || 'current-user',
+        memberCode: sanitizeMemberCode(state.profile.founderNumber),
+        memberName: state.profile.name,
+      }),
+    [
+      authUser?.uid,
+      mergedCoachRoutines,
+      state.profile.founderNumber,
+      state.profile.memberId,
+      state.profile.name,
+    ]
+  );
 
   const mergedDirectMessages = useMemo<DirectMessage[]>(() => {
     if (liveMessages.length === 0) return state.directMessages;
@@ -633,33 +690,7 @@ export default function App() {
   };
 
   const handleLoadCoachRoutine = (routine: CoachRoutine) => {
-    const mappedExercises: ActiveExercise[] = routine.exercises.map((item, idx) => {
-      const machine = getMachineByCode(item.machineCode);
-      const parsedReps = parseInt(item.targetReps, 10) || 10;
-      const isCardio = machine?.trackingMode === 'cardio';
-      return {
-        id: `loaded-${routine.id}-${idx}-${Date.now()}`,
-        machineCode: item.machineCode,
-        machineName: machine ? machine.name : item.machineCode,
-        category: machine ? machine.category : 'Máquinas Telju',
-        trackingMode: isCardio ? 'cardio' : 'strength',
-        muscleGroup: machine ? machine.muscleGroup : 'Cuádriceps',
-        restSeconds: item.restSeconds,
-        coachNote: item.note ?? machine?.tip,
-        coachName: routine.coachName,
-        coachAvatar: routine.coachAvatar,
-        sets: Array.from({ length: item.targetSets }, (_, sIdx) => ({
-          id: `s-${idx}-${sIdx}-${Date.now()}`,
-          weightKg: item.suggestedWeightKg,
-          reps: parsedReps,
-          rir: sIdx === item.targetSets - 1 ? 1 : 2,
-          completed: false,
-          previous: isCardio
-            ? `Nivel ${item.suggestedWeightKg} · ${parsedReps} min`
-            : `${item.suggestedWeightKg} kg × ${parsedReps}`,
-        })),
-      };
-    });
+    const mappedExercises = buildActiveExercisesFromCoachRoutine(routine, getMachineByCode);
 
     setState((prev) => ({
       ...prev,
@@ -679,7 +710,9 @@ export default function App() {
     if (authUser && isLiveAdmin) {
       void publishLiveRoutine({
         authorUid: authUser.uid,
-        targetMemberId: 'all',
+        targetMemberId: routine.targetMemberId ?? 'all',
+        targetMemberName: routine.targetMemberName,
+        targetMemberCode: routine.targetMemberCode,
         title: routine.title,
         frequency: routine.frequency,
         dayLabel: routine.dayLabel,
@@ -689,6 +722,8 @@ export default function App() {
         goal: routine.goal,
         coachMessage: routine.coachMessage,
         machineCodes: routine.exercises.map((e) => e.machineCode),
+        exercises: routine.exercises,
+        cardioBlock: routine.cardioBlock,
       });
     }
   };
@@ -718,7 +753,7 @@ export default function App() {
         : [
             {
               id: `s1-${Date.now()}`,
-              weightKg: machine.category === 'Mancuernas' ? 16 : machine.isPlateLoaded ? 40 : 30,
+              weightKg: machine.category === 'Mancuernas y Barra' ? 16 : machine.isPlateLoaded ? 40 : 30,
               reps: 12,
               rir: 2,
               completed: false,
@@ -726,7 +761,7 @@ export default function App() {
             },
             {
               id: `s2-${Date.now() + 1}`,
-              weightKg: machine.category === 'Mancuernas' ? 16 : machine.isPlateLoaded ? 40 : 30,
+              weightKg: machine.category === 'Mancuernas y Barra' ? 16 : machine.isPlateLoaded ? 40 : 30,
               reps: 10,
               rir: 1,
               completed: false,
@@ -1137,11 +1172,11 @@ export default function App() {
             ]
           : Array.from({ length: 3 }, (_, sIdx) => ({
               id: `sh-s-${idx}-${sIdx}-${Date.now()}`,
-              weightKg: machine?.category === 'Mancuernas' ? 18 : 50,
+              weightKg: machine?.category === 'Mancuernas y Barra' ? 18 : 50,
               reps: 10,
               rir: 2,
               completed: false,
-              previous: `${machine?.category === 'Mancuernas' ? 18 : 50} kg × 10`,
+              previous: `${machine?.category === 'Mancuernas y Barra' ? 18 : 50} kg × 10`,
             })),
       };
     });
@@ -1269,12 +1304,12 @@ export default function App() {
 
       {/* Main Content Container */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-5 sm:py-7 pb-24 md:pb-12 space-y-6">
-        {/* Non-sticky Workspace Role Switcher (Member View <-> Owner & Coach Panel) */}
+        {/* Non-sticky Workspace Role Switcher (Member View <-> Dedicated Coach Portal <-> Owner Panel) */}
         <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-white/8">
           <div
-            className="w-full sm:w-auto flex sm:inline-flex items-center gap-1 p-1 rounded-xl bg-[#0D121B] border border-white/10"
+            className="w-full sm:w-auto flex flex-wrap sm:inline-flex items-center gap-1 p-1 rounded-xl bg-[#0D121B] border border-white/10"
             role="group"
-            aria-label="Cambiar entre vista de socio y panel de dirección"
+            aria-label="Cambiar entre vista de socio, portal de coaches y panel de dirección"
           >
             <button
               type="button"
@@ -1291,17 +1326,29 @@ export default function App() {
             </button>
             <button
               type="button"
+              onClick={() => setWorkspaceMode('coach')}
+              aria-pressed={workspaceMode === 'coach'}
+              className={`min-h-[38px] px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ${
+                workspaceMode === 'coach'
+                  ? 'bg-[#00A8FF] text-[#04070D]'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              <Dumbbell className="w-3.5 h-3.5 shrink-0" />
+              Portal Coaches
+            </button>
+            <button
+              type="button"
               onClick={() => setWorkspaceMode('direccion')}
               aria-pressed={workspaceMode === 'direccion'}
-              className={`flex-1 sm:flex-initial min-w-0 min-h-[38px] px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              className={`min-h-[38px] px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap ${
                 workspaceMode === 'direccion'
                   ? 'bg-[#00A8FF] text-[#04070D]'
                   : 'text-slate-300 hover:text-white'
               }`}
             >
               <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-              <span className="sm:hidden truncate">Dirección</span>
-              <span className="hidden sm:inline">Panel Dirección y Coaches</span>
+              <span>Dirección</span>
               {uncontactedRiskCount > 0 && (
                 <span
                   className={`font-mono tabular-nums shrink-0 ${
@@ -1335,7 +1382,7 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setPresentationKitTab('setup-pdf')}
+                onClick={() => setPresentationKitTab('coach-pdf')}
                 className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#0D121B] hover:border-[#00A8FF] border border-white/15 text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
               >
                 <FileText className="w-3.5 h-3.5 text-[#33C1FF] shrink-0" />
@@ -1343,7 +1390,7 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setPresentationKitTab('setup-video')}
+                onClick={() => setPresentationKitTab('coach-video')}
                 className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#0D121B] hover:border-[#00A8FF] border border-white/15 text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
               >
                 <PlayCircle className="w-3.5 h-3.5 text-[#33C1FF] shrink-0" />
@@ -1352,15 +1399,33 @@ export default function App() {
             </div>
 
             <p className="text-xs text-slate-400 hidden lg:block">
-              {workspaceMode === 'direccion'
+              {workspaceMode === 'direccion' || workspaceMode === 'coach'
                 ? `Coach ${activeCoach.name} · Acceso total`
                 : `${state.profile.name} · ${state.profile.tier}`}
             </p>
           </div>
         </div>
 
-        {/* OWNER & COACH MANAGEMENT PANEL */}
-        {workspaceMode === 'direccion' ? (
+        {/* DEDICATED COACH PORTAL (?mode=coach / ?mode=coach-javi / ?mode=coach-joel) */}
+        {workspaceMode === 'coach' ? (
+          <CoachRoutineBuilder
+            isStandaloneCoachPortal
+            activeCoach={activeCoach}
+            onSelectCoach={handleSelectCoach}
+            authUser={authUser}
+            isLiveAdmin={isLiveAdmin}
+            onSignInGoogle={handleSignInGoogle}
+            liveMembers={liveMembers}
+            localDemoMembers={localDemoMembers}
+            coachRoutines={mergedCoachRoutines}
+            onSendCoachRoutine={handleSendCoachRoutine}
+            onPreviewRoutinesInMemberView={() => {
+              setWorkspaceMode('socio');
+              setActiveTab('entreno');
+            }}
+            onOpenPresentationKit={(tab) => setPresentationKitTab(tab)}
+          />
+        ) : workspaceMode === 'direccion' ? (
           <AdminDashboardView
             activeCoach={activeCoach}
             onSelectCoach={handleSelectCoach}
@@ -1406,7 +1471,7 @@ export default function App() {
                 profile={state.profile}
                 habits={state.habits}
                 onToggleHabit={handleToggleHabit}
-                latestCoachRoutine={mergedCoachRoutines[0]}
+                latestCoachRoutine={memberVisibleCoachRoutines[0] ?? mergedCoachRoutines[0]}
                 onStartCoachRoutine={handleLoadCoachRoutine}
                 nextBookedClass={nextBookedClass}
                 recentWorkouts={state.completedWorkouts}
@@ -1428,9 +1493,9 @@ export default function App() {
                 onFinishWorkout={handleFinishWorkout}
                 activeCoach={activeCoach}
                 onSelectCoach={handleSelectCoach}
-                coachRoutines={mergedCoachRoutines}
+                coachRoutines={memberVisibleCoachRoutines}
                 onLoadCoachRoutine={handleLoadCoachRoutine}
-                onSendCoachRoutine={handleSendCoachRoutine}
+                onOpenCoachPortal={() => setWorkspaceMode('coach')}
                 onAddMachine={handleAddMachineToWorkout}
                 profile={state.profile}
                 directMessages={mergedDirectMessages}

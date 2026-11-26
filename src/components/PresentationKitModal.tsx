@@ -2,23 +2,38 @@ import React, { useState } from 'react';
 import {
   Check,
   Download,
+  Dumbbell,
   ExternalLink,
   FileText,
   Monitor,
   PlayCircle,
   QrCode,
+  Smartphone,
   Volume2,
   X,
 } from 'lucide-react';
 import { POSTER_A3_PDF_URL, PosterA3Preview } from './PosterA3Preview';
 
-export type PresentationKitTab = 'poster' | 'setup-pdf' | 'setup-video' | 'video' | 'pdf';
+export type PresentationKitTab =
+  | 'coach-pdf'
+  | 'coach-video'
+  | 'poster'
+  | 'setup-pdf'
+  | 'setup-video'
+  | 'video'
+  | 'pdf';
 export type SpotVoiceOption = 'Enceladus' | 'Erinome';
 
 interface PresentationKitModalProps {
   initialTab: PresentationKitTab;
   onClose: () => void;
 }
+
+export const COACH_PDF_URL = '/dossier/Guia-Coach-Crear-Rutina-Socio.pdf';
+export const COACH_PDF_NAME = 'Guia-Coach-Crear-Rutina-Socio.pdf';
+
+export const COACH_VIDEO_URL = '/dossier/Video-Tutorial-Coach-Rutina-Movil-Enceladus.webm';
+export const COACH_VIDEO_NAME = 'Video-Tutorial-Coach-Rutina-Movil-Enceladus.webm';
 
 export const PDF_FILE_URL = '/dossier/Guia-Oficial-FitnessDreams-App.pdf';
 export const PDF_FILE_NAME = 'Guia-Oficial-FitnessDreams-App.pdf';
@@ -119,12 +134,42 @@ export const PresentationKitModal: React.FC<PresentationKitModalProps> = ({
           </button>
         </div>
 
-        {/* Navigation Tabs for all 5 Deliverables */}
+        {/* Navigation Tabs for all Deliverables */}
         <div
           className="flex flex-wrap items-center gap-1.5 p-1.5 rounded-xl bg-[#06080D] border border-white/10"
           role="tablist"
           aria-label="Elegir recurso del kit de apertura"
         >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'coach-pdf'}
+            onClick={() => setActiveTab('coach-pdf')}
+            className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              activeTab === 'coach-pdf'
+                ? 'bg-[#00A8FF] text-[#04070D]'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            <Dumbbell className="w-3.5 h-3.5 shrink-0" />
+            PDF Rutinas Coach
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'coach-video'}
+            onClick={() => setActiveTab('coach-video')}
+            className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              activeTab === 'coach-video'
+                ? 'bg-[#00A8FF] text-[#04070D]'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            <Smartphone className="w-3.5 h-3.5 shrink-0" />
+            Vídeo Coach Móvil (Enceladus)
+          </button>
+
           <button
             type="button"
             role="tab"
@@ -137,7 +182,7 @@ export const PresentationKitModal: React.FC<PresentationKitModalProps> = ({
             }`}
           >
             <QrCode className="w-3.5 h-3.5 shrink-0" />
-            Cartel A3 QR (Pedestal)
+            Cartel A3 QR
           </button>
 
           <button
@@ -152,7 +197,7 @@ export const PresentationKitModal: React.FC<PresentationKitModalProps> = ({
             }`}
           >
             <Monitor className="w-3.5 h-3.5 shrink-0" />
-            PDF Conexión PC + Lector
+            PDF PC + Lector
           </button>
 
           <button
@@ -167,7 +212,7 @@ export const PresentationKitModal: React.FC<PresentationKitModalProps> = ({
             }`}
           >
             <Volume2 className="w-3.5 h-3.5 shrink-0" />
-            Vídeo Audio PC + Lector
+            Vídeo PC + Lector
           </button>
 
           <button
@@ -182,7 +227,7 @@ export const PresentationKitModal: React.FC<PresentationKitModalProps> = ({
             }`}
           >
             <PlayCircle className="w-3.5 h-3.5 shrink-0" />
-            Vídeo Explicativo App
+            Vídeo App
           </button>
 
           <button
@@ -197,7 +242,7 @@ export const PresentationKitModal: React.FC<PresentationKitModalProps> = ({
             }`}
           >
             <FileText className="w-3.5 h-3.5 shrink-0" />
-            Guía Oficial App (12 págs.)
+            Guía Oficial App
           </button>
         </div>
 
@@ -208,6 +253,140 @@ export const PresentationKitModal: React.FC<PresentationKitModalProps> = ({
           >
             <Check className="w-4 h-4 text-[#33C1FF] shrink-0 mt-0.5" />
             <span>{statusMessage}</span>
+          </div>
+        )}
+
+        {/* TAB 0A: PDF GUÍA PASO A PASO PARA COACHES (CAPTURAS REALES DE LA APP) */}
+        {activeTab === 'coach-pdf' && (
+          <div className="rounded-2xl bg-[#06080D] border border-white/10 p-4 sm:p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-[#33C1FF]">
+                  Manual Oficial para Entrenadores · Con Capturas Reales de la App en Cada Paso
+                </p>
+                <h3 className="text-xl font-bold text-white mt-0.5">
+                  Cómo Preparar y Enviar una Rutina Exclusiva a un Socio
+                </h3>
+                <p className="text-xs text-slate-300 mt-1">
+                  Explica los enlaces exclusivos para coaches, la selección del socio en la base de
+                  datos, grupos musculares (Telju, Mancuernas/Barra, Polea), series 1–10, pirámides,
+                  peso, intensidad, descanso, cardio y duración diaria/semanal/mensual/trimestral.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => void handleDownloadFile(COACH_PDF_URL, COACH_PDF_NAME)}
+                  disabled={downloadingKey === COACH_PDF_NAME}
+                  className="min-h-[42px] px-4 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <Download className="w-4 h-4 shrink-0" />
+                  {downloadingKey === COACH_PDF_NAME ? 'Preparando PDF...' : 'Descargar PDF Coach'}
+                </button>
+                <a
+                  href={COACH_PDF_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-h-[42px] px-3.5 rounded-lg bg-[#0D121B] hover:border-[#00A8FF] border border-white/15 text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-[#33C1FF]" />
+                  Abrir PDF directo
+                </a>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="rounded-xl overflow-hidden border border-white/10 bg-[#0D121B]">
+                <img
+                  src="/dossier/coach-pdf-preview-p1.png"
+                  alt="Página 1 — Enlaces exclusivos de Coach y selección de socio en base de datos"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-56 object-cover object-top"
+                />
+                <div className="px-3 py-2 border-t border-white/8">
+                  <p className="text-xs font-semibold text-white">Pág. 01 · Enlaces y Base de Socios</p>
+                  <p className="text-[11px] text-slate-400">Acceso Coach distinto al socio + envío exclusivo</p>
+                </div>
+              </div>
+              <div className="rounded-xl overflow-hidden border border-white/10 bg-[#0D121B]">
+                <img
+                  src="/dossier/coach-pdf-preview-p3.png"
+                  alt="Página 3 — Grupos musculares, máquinas Telju, barra/mancuernas, polea y pirámides"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-56 object-cover object-top"
+                />
+                <div className="px-3 py-2 border-t border-white/8">
+                  <p className="text-xs font-semibold text-white">Pág. 03 · Músculos, Series y Pirámide</p>
+                  <p className="text-[11px] text-slate-400">Telju, Mancuernas/Barra, Polea y descanso</p>
+                </div>
+              </div>
+              <div className="rounded-xl overflow-hidden border border-white/10 bg-[#0D121B]">
+                <img
+                  src="/dossier/coach-pdf-preview-p5.png"
+                  alt="Página 5 — Bloque de Cardio, envío exclusivo y vista en el móvil del socio"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-56 object-cover object-top"
+                />
+                <div className="px-3 py-2 border-t border-white/8">
+                  <p className="text-xs font-semibold text-white">Pág. 05 · Cardio y Vista del Socio</p>
+                  <p className="text-[11px] text-slate-400">Recepción exclusiva en el móvil del cliente</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 0B: VÍDEO TUTORIAL DESDE EL MÓVIL CON VOZ ENCELADUS */}
+        {activeTab === 'coach-video' && (
+          <div className="rounded-2xl bg-[#06080D] border border-white/10 p-4 sm:p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-[#33C1FF]">
+                  Vídeo Tutorial desde el Móvil · Locución Voz Enceladus (Español)
+                </p>
+                <h3 className="text-xl font-bold text-white mt-0.5">
+                  Cómo Crear y Enviar una Rutina Exclusiva a un Socio desde el Móvil
+                </h3>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  Recorrido móvil real paso a paso: enlace Coach, elegir socio, periodo, grupo
+                  muscular, Telju / mancuernas / polea, series 1–10, pirámide, intensidad, descanso y cardio.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => void handleDownloadFile(COACH_VIDEO_URL, COACH_VIDEO_NAME)}
+                  disabled={downloadingKey === COACH_VIDEO_NAME}
+                  className="min-h-[42px] px-4 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <Download className="w-4 h-4 shrink-0" />
+                  {downloadingKey === COACH_VIDEO_NAME ? 'Preparando vídeo...' : 'Descargar Vídeo Enceladus'}
+                </button>
+                <a
+                  href={COACH_VIDEO_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-h-[42px] px-3.5 rounded-lg bg-[#0D121B] hover:border-[#00A8FF] border border-white/15 text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-[#33C1FF]" />
+                  Abrir directo
+                </a>
+              </div>
+            </div>
+
+            <div className="flex flex-col items-center justify-center gap-2">
+              <video
+                controls
+                playsInline
+                preload="metadata"
+                poster="/dossier/coach-video-poster.png"
+                src={COACH_VIDEO_URL}
+                className="mx-auto max-h-[60vh] w-auto rounded-xl border border-[#00A8FF]/40 bg-black"
+              />
+              <p className="text-[11px] text-slate-400">
+                Formato móvil vertical HD con locución profesional en español (<strong className="text-[#33C1FF]">Voz Enceladus</strong>). Sube el volumen para seguir cada paso.
+              </p>
+            </div>
           </div>
         )}
 

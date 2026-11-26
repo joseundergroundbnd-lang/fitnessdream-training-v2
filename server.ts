@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
+import { buildCoachTutorialVideo } from './src/server/coachTutorialBuilder';
 import { buildSetupTutorialVideo } from './src/server/setupTutorialBuilder';
 import { buildNarratedSpotVideo } from './src/server/spotAudioBuilder';
 
@@ -22,12 +23,20 @@ async function startServer() {
       'dossier',
       'Video-Tutorial-Conexion-PC-y-Movil-Lector-QR.webm'
     );
+    const coachVideoPath = path.join(
+      __dirname,
+      'public',
+      'dossier',
+      'Video-Tutorial-Coach-Rutina-Movil-Enceladus.webm'
+    );
     res.json({
       hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
       videoExists: fs.existsSync(videoPath),
       videoSizeBytes: fs.existsSync(videoPath) ? fs.statSync(videoPath).size : 0,
       setupVideoExists: fs.existsSync(setupVideoPath),
       setupVideoSizeBytes: fs.existsSync(setupVideoPath) ? fs.statSync(setupVideoPath).size : 0,
+      coachVideoExists: fs.existsSync(coachVideoPath),
+      coachVideoSizeBytes: fs.existsSync(coachVideoPath) ? fs.statSync(coachVideoPath).size : 0,
     });
   });
 
@@ -47,6 +56,17 @@ async function startServer() {
     try {
       const forceRegenerate = Boolean(req.body?.forceRegenerate);
       const result = await buildSetupTutorialVideo(__dirname, forceRegenerate);
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  app.post('/api/coach-video/build', async (req, res) => {
+    try {
+      const forceRegenerate = Boolean(req.body?.forceRegenerate);
+      const result = await buildCoachTutorialVideo(__dirname, forceRegenerate);
       res.json({ ok: true, ...result });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

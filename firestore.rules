@@ -160,6 +160,18 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidCardioBlock(cardio) {
+      return cardio is map
+        && cardio.keys().hasAll(['enabled', 'machineCode', 'machineName', 'durationMin', 'intensityLabel'])
+        && cardio.keys().hasOnly(['enabled', 'machineCode', 'machineName', 'durationMin', 'intensityLabel', 'note'])
+        && cardio.enabled is bool
+        && cardio.machineCode is string && cardio.machineCode.size() >= 1 && cardio.machineCode.size() <= 32
+        && cardio.machineName is string && cardio.machineName.size() >= 1 && cardio.machineName.size() <= 100
+        && cardio.durationMin is number && cardio.durationMin >= 1 && cardio.durationMin <= 180
+        && cardio.intensityLabel is string && cardio.intensityLabel.size() >= 1 && cardio.intensityLabel.size() <= 80
+        && (!('note' in cardio) || (cardio.note is string && cardio.note.size() <= 200));
+    }
+
     function isValidLiveCoachRoutine(data) {
       return data.keys().hasAll([
           'targetMemberId',
@@ -177,6 +189,8 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'targetMemberId',
+          'targetMemberName',
+          'targetMemberCode',
           'title',
           'frequency',
           'dayLabel',
@@ -186,20 +200,38 @@ service cloud.firestore {
           'goal',
           'coachMessage',
           'machineCodes',
+          'exercises',
+          'cardioBlock',
           'createdByUid',
           'createdAt'
         ])
         && isValidId(data.targetMemberId)
+        && (!('targetMemberName' in data) || (data.targetMemberName is string && data.targetMemberName.size() <= 100))
+        && (!('targetMemberCode' in data) || (data.targetMemberCode is string && data.targetMemberCode.size() <= 32))
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
-        && data.frequency in ['Diaria', 'Semanal']
+        && data.frequency in ['Diaria', 'Semanal', 'Mensual', 'Trimestral']
         && data.dayLabel is string && data.dayLabel.size() >= 1 && data.dayLabel.size() <= 80
         && isValidId(data.coachId)
         && data.coachName is string && data.coachName.size() >= 1 && data.coachName.size() <= 80
         && data.coachRole is string && data.coachRole.size() >= 1 && data.coachRole.size() <= 100
         && data.goal is string && data.goal.size() >= 1 && data.goal.size() <= 120
         && data.coachMessage is string && data.coachMessage.size() >= 1 && data.coachMessage.size() <= 600
-        && data.machineCodes is list && data.machineCodes.size() >= 1 && data.machineCodes.size() <= 15
+        && data.machineCodes is list && data.machineCodes.size() >= 1 && data.machineCodes.size() <= 20
         && data.machineCodes[0] is string && data.machineCodes[0].size() <= 32
+        && (!('exercises' in data) || (
+          data.exercises is list
+          && data.exercises.size() >= 1
+          && data.exercises.size() <= 20
+          && data.exercises[0] is map
+          && data.exercises[0].machineCode is string
+          && data.exercises[0].machineCode.size() <= 32
+          && data.exercises[0].targetSets is number
+          && data.exercises[0].targetSets >= 1
+          && data.exercises[0].targetSets <= 10
+          && data.exercises[0].targetReps is string
+          && data.exercises[0].targetReps.size() <= 40
+        ))
+        && (!('cardioBlock' in data) || isValidCardioBlock(data.cardioBlock))
         && isValidId(data.createdByUid)
         && data.createdAt is timestamp;
     }
@@ -378,7 +410,16 @@ service cloud.firestore {
         && isValidLiveCoachRoutine(incoming())
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'dayLabel', 'goal', 'coachMessage', 'machineCodes'])
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'frequency',
+          'dayLabel',
+          'goal',
+          'coachMessage',
+          'machineCodes',
+          'exercises',
+          'cardioBlock'
+        ])
         && isAdmin();
       allow delete: if isValidId(routineId) && isAdmin();
     }

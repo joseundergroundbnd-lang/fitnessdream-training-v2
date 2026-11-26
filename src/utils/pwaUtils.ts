@@ -92,3 +92,14 @@ export function buildReceptionPcUrl(baseUrl: string): string {
   const clean = sanitizeCustomPosterUrl(baseUrl);
   return `${clean}/?mode=direccion`;
 }
+
+/**
+ * Builds the dedicated Coach Portal URL (?mode=coach, ?mode=coach-javi, ?mode=coach-joel)
+ * so coaches enter straight into the member database & routine builder with their own link.
+ */
+export function buildCoachPortalUrl(baseUrl: string, coachSlug?: 'javi' | 'joel'): string {
+  const clean = sanitizeCustomPosterUrl(baseUrl);
+  if (coachSlug === 'javi') return `${clean}/?mode=coach-javi`;
+  if (coachSlug === 'joel') return `${clean}/?mode=coach-joel`;
+  return `${clean}/?mode=coach`;
+}

@@ -35,6 +35,7 @@ import {
   calculateWorkoutStats,
   formatSecondsClock,
 } from '../utils/gymLogic';
+import { formatPyramidSummary, normalizeEquipmentCategory } from '../utils/routineBuilder';
 
 interface WorkoutViewProps {
   activeWorkoutTitle: string;
@@ -50,7 +51,7 @@ interface WorkoutViewProps {
   onSelectCoach: (coachId: string) => void;
   coachRoutines: CoachRoutine[];
   onLoadCoachRoutine: (routine: CoachRoutine) => void;
-  onSendCoachRoutine: (routine: CoachRoutine) => void;
+  onOpenCoachPortal: () => void;
   onAddMachine: (machine: TeljuMachine) => void;
   profile: MemberProfile;
   directMessages: DirectMessage[];
@@ -60,7 +61,8 @@ interface WorkoutViewProps {
 const CATEGORY_FILTERS: ('Todos' | EquipmentCategory)[] = [
   'Todos',
   'Máquinas Telju',
-  'Mancuernas',
+  'Mancuernas y Barra',
+  'Polea',
   'Cardio',
   'Funcional',
 ];
@@ -86,7 +88,7 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
   onSelectCoach,
   coachRoutines,
   onLoadCoachRoutine,
-  onSendCoachRoutine,
+  onOpenCoachPortal,
   onAddMachine,
   profile,
   directMessages,
@@ -109,19 +111,8 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<'Todos' | EquipmentCategory>('Todos');
   const [muscleFilter, setMuscleFilter] = useState<'Todos' | MuscleGroup>('Todos');
 
-  // Coach filter & composer state
+  // Coach filter
   const [coachFilterId, setCoachFilterId] = useState<'todos' | string>('todos');
-  const [showCoachComposer, setShowCoachComposer] = useState(false);
-  const [draftTitle, setDraftTitle] = useState('');
-  const [draftFrequency, setDraftFrequency] = useState<'Diaria' | 'Semanal'>('Diaria');
-  const [draftGoal, setDraftGoal] = useState('Hipertrofia, mancuernas y cardio');
-  const [draftMessage, setDraftMessage] = useState('');
-  const [draftSelectedCodes, setDraftSelectedCodes] = useState<string[]>([
-    '4SHP10/0',
-    'MANC-01',
-    '4HP4TN',
-  ]);
-  const [coachFormError, setCoachFormError] = useState<string | null>(null);
 
   useEffect(() => {
     if (restSecondsLeft <= 0) return;
@@ -244,59 +235,6 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
         stats.totalCardioMin > 0 ? ` + ${stats.totalCardioMin} min cardio` : ''
       }. ¡Aro actualizado!`
     );
-  };
-
-  const handleToggleDraftMachine = (code: string) => {
-    setDraftSelectedCodes((prev) =>
-      prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]
-    );
-  };
-
-  const handlePublishCoachRoutine = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!draftTitle.trim()) {
-      setCoachFormError('Escribe un título para la rutina.');
-      return;
-    }
-    if (draftSelectedCodes.length === 0) {
-      setCoachFormError('Selecciona al menos una máquina Telju, ejercicio de mancuerna o cardio.');
-      return;
-    }
-    setCoachFormError(null);
-
-    const newRoutine: CoachRoutine = {
-      id: `cr-${Date.now()}`,
-      title: draftTitle.trim(),
-      frequency: draftFrequency,
-      dayLabel: draftFrequency === 'Diaria' ? 'Hoy · Enviada al móvil' : 'Plan Semanal Activo',
-      coachId: activeCoach.id,
-      coachName: activeCoach.name,
-      coachRole: activeCoach.role,
-      coachAvatar: activeCoach.avatarUrl,
-      goal: draftGoal.trim() || 'Fuerza y constancia',
-      sentAt: 'Ahora mismo',
-      isNew: true,
-      coachMessage:
-        draftMessage.trim() ||
-        'Concéntrate en la técnica en cada serie y cierra tu sesión de hoy con disciplina.',
-      exercises: draftSelectedCodes.map((code) => {
-        const machine = getMachineByCode(code);
-        const isCardio = machine?.trackingMode === 'cardio';
-        return {
-          machineCode: code,
-          targetSets: isCardio ? 1 : 4,
-          targetReps: isCardio ? '20 min' : '10-12',
-          suggestedWeightKg: isCardio ? 8 : machine?.category === 'Mancuernas' ? 16 : 50,
-          restSeconds: isCardio ? 60 : 90,
-        };
-      }),
-    };
-
-    onSendCoachRoutine(newRoutine);
-    setDraftTitle('');
-    setDraftMessage('');
-    setShowCoachComposer(false);
-    showToast(`Coach ${activeCoach.name} envió "${newRoutine.title}" al móvil del socio.`);
   };
 
   const supervisingCoachAvatar =
@@ -802,15 +740,15 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
         </div>
       )}
 
-      {/* SUBTAB 2: COACH TEAM (JAVI BUSTA & JOEL) + COACH SENDER MODE */}
+      {/* SUBTAB 2: COACH TEAM (JAVI BUSTA & JOEL) + EXCLUSIVE ROUTINES INBOX */}
       {subtab === 'coach' && (
         <div className="space-y-6">
-          {/* Featured Coaching Team Banner (Javi Busta & Joel — Both Full Access) */}
+          {/* Featured Coaching Team Banner */}
           <div className="rounded-2xl bg-[#0D121B] border border-white/10 p-6 space-y-5">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
               <div>
                 <p className="text-xs font-medium text-[#33C1FF]">
-                  Equipo Oficial FitnessDreams · Acceso total a la app y envío de rutinas
+                  Rutinas personalizadas en exclusiva · Máquinas Telju, Mancuernas, Barra y Polea
                 </p>
                 <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-[0.01em] mt-0.5">
                   Coaches Javi Busta &amp; Joel
@@ -819,13 +757,11 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
 
               <button
                 type="button"
-                onClick={() => setShowCoachComposer((v) => !v)}
-                className="min-h-[46px] px-5 py-2.5 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap self-start lg:self-auto"
+                onClick={onOpenCoachPortal}
+                className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#131B28] hover:border-[#00A8FF] border border-[#00A8FF]/45 text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap self-start lg:self-auto"
               >
-                <Send className="w-4 h-4" />
-                {showCoachComposer
-                  ? 'Cerrar Panel Coach'
-                  : `Enviar rutina como ${activeCoach.name}`}
+                <Send className="w-4 h-4 text-[#00A8FF]" />
+                <span>¿Eres Coach? Abrir Portal Coaches</span>
               </button>
             </div>
 
@@ -864,21 +800,7 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
                           className="min-h-[34px] px-3 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
                         >
                           <MessageSquare className="w-3.5 h-3.5" />
-                          Mensaje / Audio
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSelectCoach(coach.id);
-                            setShowCoachComposer(true);
-                          }}
-                          className={`min-h-[34px] px-3 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                            isSelected
-                              ? 'bg-[#131B28] border border-[#00A8FF] text-[#33C1FF]'
-                              : 'bg-[#131B28] hover:border-[#00A8FF] border border-white/10 text-slate-200'
-                          }`}
-                        >
-                          {isSelected ? `Enviar rutina (${coach.name})` : `Usar como ${coach.name}`}
+                          Pedir rutina / Audio
                         </button>
                       </div>
                     </div>
@@ -887,167 +809,6 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
               })}
             </div>
           </div>
-
-          {/* Interactive Coach Routine Sender (Supports both Javi Busta & Joel) */}
-          {showCoachComposer && (
-            <form
-              onSubmit={handlePublishCoachRoutine}
-              className="rounded-2xl bg-[#0D121B] border border-[#00A8FF]/35 p-6 space-y-5"
-            >
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <img
-                    src={activeCoach.avatarUrl}
-                    alt={`Coach ${activeCoach.name}`}
-                    referrerPolicy="no-referrer"
-                    className="w-12 h-14 rounded-xl object-cover object-top border border-[#00A8FF]"
-                  />
-                  <div>
-                    <h3 className="text-xl font-bold text-white">
-                      Panel de Coach {activeCoach.name} — Enviar rutina al socio
-                    </h3>
-                    <p className="text-xs text-slate-400">
-                      La rutina llegará al móvil del socio firmada con la foto oficial de{' '}
-                      {activeCoach.name}.
-                    </p>
-                  </div>
-                </div>
-
-                <div
-                  className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#06080D] border border-white/10 self-start"
-                  role="group"
-                  aria-label="Elegir entrenador emisor"
-                >
-                  {COACH_TEAM.map((coach) => (
-                    <button
-                      key={coach.id}
-                      type="button"
-                      onClick={() => onSelectCoach(coach.id)}
-                      aria-pressed={activeCoach.id === coach.id}
-                      className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap ${
-                        activeCoach.id === coach.id
-                          ? 'bg-[#00A8FF] text-[#04070D]'
-                          : 'text-slate-300 hover:text-white'
-                      }`}
-                    >
-                      {coach.name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {coachFormError && (
-                <p role="alert" className="text-xs text-rose-400 font-medium">
-                  {coachFormError}
-                </p>
-              )}
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="sm:col-span-2">
-                  <label htmlFor="coach-title" className="block text-xs text-slate-400 mb-1.5">
-                    Nombre de la rutina
-                  </label>
-                  <input
-                    id="coach-title"
-                    type="text"
-                    placeholder="Ej. Fuerza Telju + Mancuernas + Cinta"
-                    value={draftTitle}
-                    onChange={(e) => setDraftTitle(e.target.value)}
-                    className="w-full min-h-[44px] rounded-xl bg-[#06080D] border border-white/12 px-3.5 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#00A8FF]"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="coach-freq" className="block text-xs text-slate-400 mb-1.5">
-                    Frecuencia
-                  </label>
-                  <select
-                    id="coach-freq"
-                    value={draftFrequency}
-                    onChange={(e) => setDraftFrequency(e.target.value as 'Diaria' | 'Semanal')}
-                    className="w-full min-h-[44px] rounded-xl bg-[#06080D] border border-white/12 px-3.5 text-sm text-white focus:outline-none focus:border-[#00A8FF]"
-                  >
-                    <option value="Diaria">Rutina Diaria</option>
-                    <option value="Semanal">Plan Semanal</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="coach-goal" className="block text-xs text-slate-400 mb-1.5">
-                    Objetivo
-                  </label>
-                  <input
-                    id="coach-goal"
-                    type="text"
-                    value={draftGoal}
-                    onChange={(e) => setDraftGoal(e.target.value)}
-                    className="w-full min-h-[44px] rounded-xl bg-[#06080D] border border-white/12 px-3.5 text-sm text-white focus:outline-none focus:border-[#00A8FF]"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="coach-msg" className="block text-xs text-slate-400 mb-1.5">
-                    Indicaciones de {activeCoach.name} para el socio
-                  </label>
-                  <input
-                    id="coach-msg"
-                    type="text"
-                    placeholder="Ej. Técnica limpia y 15 min finales en cinta inclinada"
-                    value={draftMessage}
-                    onChange={(e) => setDraftMessage(e.target.value)}
-                    className="w-full min-h-[44px] rounded-xl bg-[#06080D] border border-white/12 px-3.5 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#00A8FF]"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <p className="text-xs text-slate-400">
-                  Selecciona máquinas Telju, mancuernas o cardio ({draftSelectedCodes.length}{' '}
-                  seleccionados)
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-56 overflow-y-auto pr-1">
-                  {TELJU_MACHINES.map((m) => {
-                    const selected = draftSelectedCodes.includes(m.code);
-                    return (
-                      <button
-                        key={m.code}
-                        type="button"
-                        onClick={() => handleToggleDraftMachine(m.code)}
-                        aria-pressed={selected}
-                        className={`min-h-[44px] px-3 py-2 rounded-xl text-left text-xs border transition-colors cursor-pointer ${
-                          selected
-                            ? 'bg-[#00A8FF]/18 border-[#00A8FF] text-white'
-                            : 'bg-[#06080D] border-white/10 text-slate-300 hover:border-white/25'
-                        }`}
-                      >
-                        <p className="font-semibold truncate">{m.name}</p>
-                        <p className="font-mono text-[11px] text-slate-400">
-                          {m.category} · {m.code}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-3 pt-2 border-t border-white/8">
-                <button
-                  type="button"
-                  onClick={() => setShowCoachComposer(false)}
-                  className="min-h-[44px] px-4 rounded-xl bg-white/6 text-xs font-medium text-slate-300 hover:text-white cursor-pointer"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  className="min-h-[44px] px-5 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center gap-2 cursor-pointer"
-                >
-                  <Send className="w-4 h-4" />
-                  Enviar al móvil del socio
-                </button>
-              </div>
-            </form>
-          )}
 
           {/* Filter Routines by Coach */}
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1085,86 +846,139 @@ export const WorkoutView: React.FC<WorkoutViewProps> = ({
             </div>
             <span className="text-xs text-slate-400 flex items-center gap-1.5">
               <UserPlus className="w-3.5 h-3.5 text-[#00A8FF]" />
-              Javi Busta y Joel · Rutinas sincronizadas en directo
+              Solo ves tus rutinas exclusivas y las del club
             </span>
           </div>
 
           {/* Coach Inbox Cards featuring uniformed FitnessDreams portraits */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            {visibleCoachRoutines.map((routine) => (
-              <article
-                key={routine.id}
-                className="rounded-2xl bg-[#0D121B] border border-white/10 p-6 flex flex-col justify-between gap-5"
-              >
-                <div className="space-y-4">
-                  <div className="flex items-center gap-3.5">
-                    <img
-                      src={routine.coachAvatar}
-                      alt={`Coach ${routine.coachName} uniformado FitnessDreams`}
-                      referrerPolicy="no-referrer"
-                      className="w-16 h-20 rounded-xl object-cover object-top border border-[#00A8FF]/50 shrink-0"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2 text-xs">
-                        <span className="text-[#33C1FF] font-semibold">
-                          {routine.frequency} · {routine.dayLabel}
-                        </span>
-                        <span className="text-slate-400">{routine.sentAt}</span>
-                      </div>
-                      <h3 className="text-2xl font-bold text-white tracking-[0.01em] leading-tight mt-1">
-                        {routine.title}
-                      </h3>
-                      <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1.5">
-                        <UserCheck className="w-3.5 h-3.5 text-[#00A8FF]" />
-                        {routine.coachName} · {routine.goal}
-                      </p>
-                    </div>
-                  </div>
+            {visibleCoachRoutines.map((routine) => {
+              const isExclusive = Boolean(routine.targetMemberId && routine.targetMemberId !== 'all');
+              const cardioMachine = routine.cardioBlock
+                ? getMachineByCode(routine.cardioBlock.machineCode)
+                : undefined;
 
-                  <p className="text-sm text-slate-300 leading-relaxed">
-                    “{routine.coachMessage}”
-                  </p>
-
-                  <div className="divide-y divide-white/8 border-t border-white/8 pt-2">
-                    {routine.exercises.map((item) => {
-                      const machine = getMachineByCode(item.machineCode);
-                      return (
-                        <div
-                          key={item.machineCode}
-                          className="py-2.5 flex items-center justify-between gap-3 text-xs"
-                        >
-                          <div className="min-w-0">
-                            <p className="font-medium text-white truncate">
-                              {machine ? machine.name : item.machineCode}
-                            </p>
-                            <p className="font-mono text-slate-400">
-                              {machine?.category ?? 'Telju'} · {item.machineCode}
-                              {item.note ? ` · ${item.note}` : ''}
-                            </p>
-                          </div>
-                          <span className="font-mono tabular-nums text-slate-300 shrink-0">
-                            {item.targetSets} × {item.targetReps}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    onLoadCoachRoutine(routine);
-                    setSubtab('activo');
-                    showToast(`Rutina "${routine.title}" cargada en tu Entreno Activo.`);
-                  }}
-                  className="w-full min-h-[46px] rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              return (
+                <article
+                  key={routine.id}
+                  className={`rounded-2xl bg-[#0D121B] border p-5 sm:p-6 flex flex-col justify-between gap-5 ${
+                    isExclusive ? 'border-[#00A8FF]/55' : 'border-white/10'
+                  }`}
                 >
-                  <Play className="w-4 h-4 fill-current" />
-                  Cargar y entrenar ahora
-                </button>
-              </article>
-            ))}
+                  <div className="space-y-4">
+                    <div className="flex items-start gap-3.5">
+                      <img
+                        src={routine.coachAvatar}
+                        alt={`Coach ${routine.coachName} uniformado FitnessDreams`}
+                        referrerPolicy="no-referrer"
+                        className="w-16 h-20 rounded-xl object-cover object-top border border-[#00A8FF]/50 shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                          <span className="text-[#33C1FF] font-semibold">
+                            Plan {routine.frequency} · {routine.dayLabel}
+                          </span>
+                          <span className="text-slate-400">{routine.sentAt}</span>
+                        </div>
+                        <h3 className="text-xl sm:text-2xl font-bold text-white tracking-[0.01em] leading-tight mt-1">
+                          {routine.title}
+                        </h3>
+                        <p className="text-xs text-slate-300 mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                          <span className="inline-flex items-center gap-1 text-slate-300">
+                            <UserCheck className="w-3.5 h-3.5 text-[#00A8FF]" />
+                            Coach {routine.coachName}
+                          </span>
+                          <span aria-hidden="true" className="text-slate-600">·</span>
+                          <span className={isExclusive ? 'text-emerald-300 font-semibold' : 'text-slate-400'}>
+                            {isExclusive
+                              ? `Exclusiva para ${routine.targetMemberName ?? profile.name}`
+                              : 'General del club'}
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+
+                    <p className="text-sm text-slate-300 leading-relaxed">
+                      “{routine.coachMessage}”
+                    </p>
+
+                    <div className="divide-y divide-white/8 border-t border-white/8 pt-2">
+                      {routine.exercises.map((item, exIdx) => {
+                        const machine = getMachineByCode(item.machineCode);
+                        const equipLabel = normalizeEquipmentCategory(
+                          item.equipmentType ?? machine?.category ?? 'Máquinas Telju'
+                        );
+                        const isPyramid = item.repScheme === 'piramide';
+                        return (
+                          <div
+                            key={`${item.machineCode}-${exIdx}`}
+                            className="py-2.5 flex items-start justify-between gap-3 text-xs"
+                          >
+                            <div className="min-w-0 space-y-0.5">
+                              <p className="font-semibold text-white">
+                                {item.exerciseName ?? machine?.name ?? item.machineCode}
+                              </p>
+                              <p className="font-mono text-[11px] text-slate-400">
+                                {equipLabel} · {item.muscleGroup ?? machine?.muscleGroup ?? 'Sala'} ·{' '}
+                                {item.suggestedWeightKg > 0 ? `${item.suggestedWeightKg} kg · ` : ''}
+                                Desc. {item.restSeconds}s
+                              </p>
+                              {isPyramid && item.pyramidSets && item.pyramidSets.length > 0 && (
+                                <p className="font-mono text-[11px] text-[#33C1FF]">
+                                  Pirámide: {formatPyramidSummary(item.pyramidSets)}
+                                </p>
+                              )}
+                              {item.intensityLabel && (
+                                <p className="text-[11px] text-amber-300/90">
+                                  Intensidad: {item.intensityLabel}
+                                </p>
+                              )}
+                              {item.note && (
+                                <p className="text-[11px] text-slate-400">{item.note}</p>
+                              )}
+                            </div>
+                            <span className="font-mono tabular-nums text-white font-semibold shrink-0 text-right">
+                              {item.targetSets} × {item.targetReps}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {routine.cardioBlock && routine.cardioBlock.enabled && (
+                      <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/35 px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-emerald-300 flex items-center gap-1.5">
+                            <Activity className="w-3.5 h-3.5 shrink-0" />
+                            Cardio incluido · {cardioMachine?.name ?? routine.cardioBlock.machineName}
+                          </p>
+                          <p className="text-[11px] text-slate-300 mt-0.5">
+                            {routine.cardioBlock.intensityLabel}
+                            {routine.cardioBlock.note ? ` · ${routine.cardioBlock.note}` : ''}
+                          </p>
+                        </div>
+                        <span className="font-mono tabular-nums font-bold text-emerald-300 shrink-0">
+                          {routine.cardioBlock.durationMin} min
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onLoadCoachRoutine(routine);
+                      setSubtab('activo');
+                      showToast(`Rutina "${routine.title}" cargada en tu Entreno Activo.`);
+                    }}
+                    className="w-full min-h-[46px] rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <Play className="w-4 h-4 fill-current" />
+                    Cargar y entrenar ahora
+                  </button>
+                </article>
+              );
+            })}
           </div>
         </div>
       )}

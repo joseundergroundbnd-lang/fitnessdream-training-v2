@@ -8,7 +8,33 @@ export type MuscleGroup =
   | 'Core / Funcional'
   | 'Cardio';
 
-export type EquipmentCategory = 'Máquinas Telju' | 'Mancuernas' | 'Cardio' | 'Funcional';
+export type EquipmentCategory =
+  | 'Máquinas Telju'
+  | 'Mancuernas y Barra'
+  | 'Polea'
+  | 'Cardio'
+  | 'Funcional';
+
+export type RoutineFrequency = 'Diaria' | 'Semanal' | 'Mensual' | 'Trimestral';
+
+export type RepSchemeMode = 'fijas' | 'piramide';
+
+export type PyramidPreset = 'ascendente' | 'descendente' | 'doble' | 'personalizada';
+
+export interface PyramidSetSpec {
+  setNumber: number;
+  reps: number;
+  weightKg: number;
+}
+
+export interface CoachRoutineCardioBlock {
+  enabled: boolean;
+  machineCode: string;
+  machineName: string;
+  durationMin: number;
+  intensityLabel: string;
+  note?: string;
+}
 
 export type GymZoneId =
   | 'cardio'
@@ -23,7 +49,13 @@ export type GymZoneId =
 export interface TeljuMachine {
   code: string;
   name: string;
-  line: 'Telju Shock' | 'Telju Plate-Loaded' | 'Telju Cardio' | 'Iron Captain' | 'Mancuernas Libres';
+  line:
+    | 'Telju Shock'
+    | 'Telju Plate-Loaded'
+    | 'Telju Cardio'
+    | 'Telju Poleas'
+    | 'Iron Captain'
+    | 'Mancuernas y Barra';
   category: EquipmentCategory;
   trackingMode: 'strength' | 'cardio';
   muscleGroup: MuscleGroup;
@@ -71,6 +103,8 @@ export interface ActiveExercise {
   coachNote?: string;
   coachName?: string;
   coachAvatar?: string;
+  intensityLabel?: string;
+  repScheme?: RepSchemeMode;
   sets: WorkoutSet[];
 }
 
@@ -92,11 +126,30 @@ export interface DailyQuote {
   signature: string;
 }
 
+export interface CoachRoutineExercise {
+  machineCode: string;
+  exerciseName?: string;
+  muscleGroup?: MuscleGroup;
+  equipmentType?: EquipmentCategory;
+  targetSets: number; // 1..10
+  repScheme?: RepSchemeMode;
+  targetReps: string;
+  pyramidPreset?: PyramidPreset;
+  pyramidSets?: PyramidSetSpec[];
+  suggestedWeightKg: number;
+  intensityLabel?: string;
+  restSeconds: number;
+  note?: string;
+}
+
 export interface CoachRoutine {
   id: string;
   title: string;
-  frequency: 'Diaria' | 'Semanal';
+  frequency: RoutineFrequency;
   dayLabel: string;
+  targetMemberId?: string; // 'all' or specific member uid/id
+  targetMemberName?: string;
+  targetMemberCode?: string;
   coachId: string;
   coachName: string;
   coachRole: string;
@@ -105,14 +158,8 @@ export interface CoachRoutine {
   sentAt: string;
   isNew?: boolean;
   coachMessage: string;
-  exercises: {
-    machineCode: string;
-    targetSets: number;
-    targetReps: string;
-    suggestedWeightKg: number;
-    restSeconds: number;
-    note?: string;
-  }[];
+  exercises: CoachRoutineExercise[];
+  cardioBlock?: CoachRoutineCardioBlock;
 }
 
 export type ClassDiscipline = 'Jiu-Jitsu' | 'Boxeo' | 'Jumping Fitness';
@@ -222,7 +269,7 @@ export interface MemberProfile {
 
 export type MainTab = 'inicio' | 'entreno' | 'clases' | 'mapa' | 'club';
 
-export type AppWorkspaceMode = 'socio' | 'direccion' | 'lector';
+export type AppWorkspaceMode = 'socio' | 'coach' | 'direccion' | 'lector';
 
 export interface ClubMemberRecord {
   id: string;

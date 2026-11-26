@@ -218,7 +218,7 @@
     },
     "LiveCoachRoutine": {
       "title": "LiveCoachRoutine",
-      "description": "Official routine sent by Javi Busta or Joel to all members or a specific member.",
+      "description": "Official routine sent by any authorized coach (Javi Busta, Joel, etc.) to a specific member exclusively or to all members, including muscle-group exercises (1-10 sets, fixed reps or pyramid, weight/intensity, rest) and optional cardio block.",
       "type": "object",
       "properties": {
         "targetMemberId": {
@@ -227,6 +227,14 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
+        "targetMemberName": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "targetMemberCode": {
+          "type": "string",
+          "maxLength": 32
+        },
         "title": {
           "type": "string",
           "minLength": 1,
@@ -234,7 +242,7 @@
         },
         "frequency": {
           "type": "string",
-          "enum": ["Diaria", "Semanal"]
+          "enum": ["Diaria", "Semanal", "Mensual", "Trimestral"]
         },
         "dayLabel": {
           "type": "string",
@@ -269,6 +277,12 @@
         },
         "machineCodes": {
           "type": "array"
+        },
+        "exercises": {
+          "type": "array"
+        },
+        "cardioBlock": {
+          "type": "object"
         },
         "createdByUid": {
           "type": "string",

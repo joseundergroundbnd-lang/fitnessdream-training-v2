@@ -67,8 +67,10 @@ export interface LiveAccessLog {
 export interface LiveCoachRoutineDoc {
   id: string;
   targetMemberId: string;
+  targetMemberName?: string;
+  targetMemberCode?: string;
   title: string;
-  frequency: 'Diaria' | 'Semanal';
+  frequency: 'Diaria' | 'Semanal' | 'Mensual' | 'Trimestral';
   dayLabel: string;
   coachId: string;
   coachName: string;
@@ -76,6 +78,8 @@ export interface LiveCoachRoutineDoc {
   goal: string;
   coachMessage: string;
   machineCodes: string[];
+  exercises?: import('../types/gym').CoachRoutineExercise[];
+  cardioBlock?: import('../types/gym').CoachRoutineCardioBlock;
   createdByUid: string;
   createdAtLabel: string;
 }
@@ -536,8 +540,10 @@ export async function verifyAndLogTurnstileScan(params: {
 export async function publishLiveRoutine(params: {
   authorUid: string;
   targetMemberId: string;
+  targetMemberName?: string;
+  targetMemberCode?: string;
   title: string;
-  frequency: 'Diaria' | 'Semanal';
+  frequency: 'Diaria' | 'Semanal' | 'Mensual' | 'Trimestral';
   dayLabel: string;
   coachId: string;
   coachName: string;
@@ -545,29 +551,86 @@ export async function publishLiveRoutine(params: {
   goal: string;
   coachMessage: string;
   machineCodes: string[];
+  exercises?: import('../types/gym').CoachRoutineExercise[];
+  cardioBlock?: import('../types/gym').CoachRoutineCardioBlock;
 }): Promise<void> {
   const routineId = sanitizeId(`rt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
   const safeCodes = params.machineCodes
     .map((c) => c.trim().slice(0, 32))
     .filter(Boolean)
-    .slice(0, 15);
+    .slice(0, 20);
   if (safeCodes.length === 0) return;
 
-  try {
-    await setDoc(doc(db, 'coachRoutines', routineId), {
-      targetMemberId: sanitizeId(params.targetMemberId || 'all'),
-      title: clampText(params.title, 120, 'Rutina FitnessDreams'),
-      frequency: params.frequency === 'Semanal' ? 'Semanal' : 'Diaria',
-      dayLabel: clampText(params.dayLabel, 80, 'Hoy'),
-      coachId: sanitizeId(params.coachId),
-      coachName: clampText(params.coachName, 80, 'Javi Busta'),
-      coachRole: clampText(params.coachRole, 100, 'Coach FitnessDreams'),
-      goal: clampText(params.goal, 120, 'Fuerza y constancia'),
-      coachMessage: clampText(params.coachMessage, 600, '¡A por todas hoy!'),
-      machineCodes: safeCodes,
-      createdByUid: sanitizeId(params.authorUid),
-      createdAt: serverTimestamp(),
+  const validFrequency: 'Diaria' | 'Semanal' | 'Mensual' | 'Trimestral' =
+    params.frequency === 'Semanal' ||
+    params.frequency === 'Mensual' ||
+    params.frequency === 'Trimestral'
+      ? params.frequency
+      : 'Diaria';
+
+  const payload: Record<string, unknown> = {
+    targetMemberId: sanitizeId(params.targetMemberId || 'all'),
+    title: clampText(params.title, 120, 'Rutina FitnessDreams'),
+    frequency: validFrequency,
+    dayLabel: clampText(params.dayLabel, 80, 'Hoy'),
+    coachId: sanitizeId(params.coachId),
+    coachName: clampText(params.coachName, 80, 'Javi Busta'),
+    coachRole: clampText(params.coachRole, 100, 'Coach FitnessDreams'),
+    goal: clampText(params.goal, 120, 'Fuerza y constancia'),
+    coachMessage: clampText(params.coachMessage, 600, '¡A por todas hoy!'),
+    machineCodes: safeCodes,
+    createdByUid: sanitizeId(params.authorUid),
+    createdAt: serverTimestamp(),
+  };
+
+  if (params.targetMemberName) {
+    payload.targetMemberName = clampText(params.targetMemberName, 100);
+  }
+  if (params.targetMemberCode) {
+    payload.targetMemberCode = clampText(params.targetMemberCode, 32);
+  }
+  if (params.exercises && params.exercises.length > 0) {
+    payload.exercises = params.exercises.slice(0, 20).map((ex) => {
+      const cleanEx: Record<string, unknown> = {
+        machineCode: clampText(ex.machineCode, 32, '4SHP01/0'),
+        targetSets: Math.min(10, Math.max(1, Math.round(ex.targetSets || 4))),
+        repScheme: ex.repScheme === 'piramide' ? 'piramide' : 'fijas',
+        targetReps: clampText(ex.targetReps, 40, '10-12'),
+        suggestedWeightKg: Math.max(0, Number(ex.suggestedWeightKg ?? 0)),
+        restSeconds: Math.min(600, Math.max(15, Math.round(ex.restSeconds || 90))),
+      };
+      if (ex.exerciseName) cleanEx.exerciseName = clampText(ex.exerciseName, 100);
+      if (ex.muscleGroup) cleanEx.muscleGroup = clampText(ex.muscleGroup, 40);
+      if (ex.equipmentType) cleanEx.equipmentType = clampText(ex.equipmentType, 40);
+      if (ex.pyramidPreset) cleanEx.pyramidPreset = ex.pyramidPreset;
+      if (ex.pyramidSets && ex.pyramidSets.length > 0) {
+        cleanEx.pyramidSets = ex.pyramidSets.slice(0, 10).map((ps) => ({
+          setNumber: Math.min(10, Math.max(1, Math.round(ps.setNumber))),
+          reps: Math.min(100, Math.max(1, Math.round(ps.reps))),
+          weightKg: Math.max(0, Number(ps.weightKg ?? 0)),
+        }));
+      }
+      if (ex.intensityLabel) cleanEx.intensityLabel = clampText(ex.intensityLabel, 60);
+      if (ex.note) cleanEx.note = clampText(ex.note, 200);
+      return cleanEx;
     });
+  }
+  if (params.cardioBlock?.enabled) {
+    const cardioPayload: Record<string, unknown> = {
+      enabled: true,
+      machineCode: clampText(params.cardioBlock.machineCode, 32, '4HP4TN'),
+      machineName: clampText(params.cardioBlock.machineName, 100, 'Cinta de Correr Health'),
+      durationMin: Math.min(180, Math.max(1, Math.round(params.cardioBlock.durationMin || 20))),
+      intensityLabel: clampText(params.cardioBlock.intensityLabel, 80, 'Zona 2 · Moderada'),
+    };
+    if (params.cardioBlock.note) {
+      cardioPayload.note = clampText(params.cardioBlock.note, 200);
+    }
+    payload.cardioBlock = cardioPayload;
+  }
+
+  try {
+    await setDoc(doc(db, 'coachRoutines', routineId), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `coachRoutines/${routineId}`);
   }
@@ -743,11 +806,17 @@ export function subscribeLiveRoutines(
       const list: LiveCoachRoutineDoc[] = snapshot.docs.map((snap) => {
         const d = snap.data();
         const ts = formatTimestampLabel(d.createdAt);
+        const freq: LiveCoachRoutineDoc['frequency'] =
+          d.frequency === 'Semanal' || d.frequency === 'Mensual' || d.frequency === 'Trimestral'
+            ? d.frequency
+            : 'Diaria';
         return {
           id: snap.id,
           targetMemberId: String(d.targetMemberId ?? 'all'),
+          targetMemberName: typeof d.targetMemberName === 'string' ? d.targetMemberName : undefined,
+          targetMemberCode: typeof d.targetMemberCode === 'string' ? d.targetMemberCode : undefined,
           title: String(d.title ?? 'Rutina Coach'),
-          frequency: d.frequency === 'Semanal' ? 'Semanal' : 'Diaria',
+          frequency: freq,
           dayLabel: String(d.dayLabel ?? 'En directo'),
           coachId: String(d.coachId ?? 'coach-javi'),
           coachName: String(d.coachName ?? 'Javi Busta'),
@@ -755,6 +824,13 @@ export function subscribeLiveRoutines(
           goal: String(d.goal ?? ''),
           coachMessage: String(d.coachMessage ?? ''),
           machineCodes: Array.isArray(d.machineCodes) ? d.machineCodes.map(String) : [],
+          exercises: Array.isArray(d.exercises)
+            ? (d.exercises as import('../types/gym').CoachRoutineExercise[])
+            : undefined,
+          cardioBlock:
+            d.cardioBlock && typeof d.cardioBlock === 'object'
+              ? (d.cardioBlock as import('../types/gym').CoachRoutineCardioBlock)
+              : undefined,
           createdByUid: String(d.createdByUid ?? ''),
           createdAtLabel: ts.label,
         };
