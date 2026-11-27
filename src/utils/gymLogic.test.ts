@@ -365,5 +365,39 @@ test('qrPass encodes and parses real scannable turnstile payloads and manual mem
   assert.equal(clampText('  Hola mundo  ', 4), 'Hola');
 });
 
+test('matchMemberForQrPayload resolves live members by UID, memberCode, and ignores current-user placeholder', async () => {
+  const { matchMemberForQrPayload, parseMemberQrPayload } = await import('./qrPass');
+
+  const directory = [
+    { id: 'uid_unai_1', uid: 'uid_unai_1', memberCode: 'FD-1122', name: 'Unai' },
+    { id: 'uid_nieve_2', uid: 'uid_nieve_2', memberCode: 'FD-7788', name: 'Nieve' },
+  ];
+
+  // Exact UID match
+  const byUid = matchMemberForQrPayload(
+    parseMemberQrPayload('FD:MEMBER:uid_nieve_2|FD-7788'),
+    directory
+  );
+  assert.equal(byUid?.name, 'Nieve');
+
+  // QR opened before local memberId synced ('current-user') still resolves via memberCode
+  const byCodeFallback = matchMemberForQrPayload(
+    parseMemberQrPayload('FD:MEMBER:current-user|FD-7788'),
+    directory
+  );
+  assert.equal(byCodeFallback?.name, 'Nieve');
+
+  // Manual code entry (#7788 or fd-7788)
+  const byManual = matchMemberForQrPayload(parseMemberQrPayload('#7788'), directory);
+  assert.equal(byManual?.name, 'Nieve');
+
+  // Unknown member returns null
+  const unknown = matchMemberForQrPayload(
+    parseMemberQrPayload('FD:MEMBER:uid_other|FD-9999'),
+    directory
+  );
+  assert.equal(unknown, null);
+});
+
 
 

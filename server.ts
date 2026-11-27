@@ -6,6 +6,11 @@ import { createServer as createViteServer } from 'vite';
 import { buildCoachTutorialVideo } from './src/server/coachTutorialBuilder';
 import { buildSetupTutorialVideo } from './src/server/setupTutorialBuilder';
 import { buildNarratedSpotVideo } from './src/server/spotAudioBuilder';
+import {
+  getPublicPushConfig,
+  handleSendPushRequest,
+  type SendPushRequestBody,
+} from './src/server/webPushHandler';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,6 +19,19 @@ const PORT = Number(process.env.PORT) || 3000;
 async function startServer() {
   const app = express();
   app.use(express.json());
+
+  app.get('/api/push/public-key', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(getPublicPushConfig());
+  });
+
+  app.post('/api/push/send', async (req, res) => {
+    const result = await handleSendPushRequest({
+      authHeader: typeof req.headers.authorization === 'string' ? req.headers.authorization : undefined,
+      body: (req.body || {}) as SendPushRequestBody,
+    });
+    res.status(result.status).json(result.payload);
+  });
 
   app.get('/api/spot/status', (_req, res) => {
     const videoPath = path.join(__dirname, 'public', 'dossier', 'Video-Demo-Movil-FitnessDreams.webm');

@@ -223,3 +223,53 @@ export async function showGymNotification(payload: {
     return false;
   }
 }
+
+/**
+ * Loads previously seen notification IDs from localStorage so messages/routines
+ * that arrived while the mobile app was closed still alert the user upon reopening.
+ */
+export function loadSeenNotificationIds(storageKey: string): {
+  hydrated: boolean;
+  ids: Set<string>;
+} {
+  if (typeof window === 'undefined') {
+    return { hydrated: false, ids: new Set() };
+  }
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return { hydrated: false, ids: new Set() };
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return { hydrated: false, ids: new Set() };
+    const clean = parsed.filter((v): v is string => typeof v === 'string' && v.length > 0);
+    return { hydrated: true, ids: new Set(clean) };
+  } catch {
+    return { hydrated: false, ids: new Set() };
+  }
+}
+
+export function saveSeenNotificationIds(storageKey: string, ids: Set<string>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const arr = Array.from(ids).slice(-250);
+    window.localStorage.setItem(storageKey, JSON.stringify(arr));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function setAppNotificationBadge(unreadCount: number): void {
+  if (typeof navigator === 'undefined') return;
+  const nav = navigator as Navigator & {
+    setAppBadge?: (count?: number) => Promise<void>;
+    clearAppBadge?: () => Promise<void>;
+  };
+  try {
+    if (unreadCount > 0 && typeof nav.setAppBadge === 'function') {
+      void nav.setAppBadge(unreadCount).catch(() => {});
+    } else if (unreadCount <= 0 && typeof nav.clearAppBadge === 'function') {
+      void nav.clearAppBadge().catch(() => {});
+    }
+  } catch {
+    // Ignore unsupported badge API
+  }
+}

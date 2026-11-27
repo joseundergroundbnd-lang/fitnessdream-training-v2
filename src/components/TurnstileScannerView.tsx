@@ -5,8 +5,10 @@ import {
   ArrowLeft,
   Camera,
   CheckCircle2,
+  ImagePlus,
   KeyRound,
   LogIn,
+  LogOut,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
@@ -28,7 +30,15 @@ import { BOOTSTRAPPED_OWNER_EMAIL, OFFICIAL_GYM_EMAIL } from '../firebase';
 interface TurnstileScannerViewProps {
   authUser: User | null;
   isLiveAdmin: boolean;
+  isSigningIn?: boolean;
+  authError?: string | null;
+  authNotice?: { tone: 'success' | 'warning' | 'info'; message: string } | null;
+  onDismissAuthError?: () => void;
+  onDismissAuthNotice?: () => void;
   onSignInGoogle: (loginHintEmail?: string) => Promise<void>;
+  onSignOutGoogle?: () => Promise<void>;
+  onRefreshLiveMembers?: () => Promise<unknown>;
+  isRefreshingMembers?: boolean;
   liveMembers: LiveGymMember[];
   localFallbackMembers: LiveGymMember[];
   liveAccessLogs: LiveAccessLog[];
@@ -100,7 +110,15 @@ function playTurnstileTone(kind: 'granted' | 'denied' | 'unknown', enabled: bool
 export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
   authUser,
   isLiveAdmin,
+  isSigningIn = false,
+  authError = null,
+  authNotice = null,
+  onDismissAuthError,
+  onDismissAuthNotice,
   onSignInGoogle,
+  onSignOutGoogle,
+  onRefreshLiveMembers,
+  isRefreshingMembers = false,
   liveMembers,
   localFallbackMembers,
   liveAccessLogs,
@@ -110,6 +128,7 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [photoScanStatus, setPhotoScanStatus] = useState<string | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [manualCode, setManualCode] = useState('');
   const [isValidating, setIsValidating] = useState(false);
@@ -118,6 +137,7 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const photoInputRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastScannedRef = useRef<{ code: string; at: number }>({ code: '', at: 0 });
@@ -136,12 +156,12 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
   }, []);
 
   const processQrString = useCallback(
-    async (rawQr: string) => {
+    async (rawQr: string, sourceLabel?: string) => {
       const trimmed = rawQr.trim();
       if (!trimmed || isValidating) return;
 
       const nowMs = Date.now();
-      if (lastScannedRef.current.code === trimmed && nowMs - lastScannedRef.current.at < 3000) {
+      if (lastScannedRef.current.code === trimmed && nowMs - lastScannedRef.current.at < 2600) {
         return;
       }
       lastScannedRef.current = { code: trimmed, at: nowMs };
@@ -150,7 +170,9 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
       try {
         const outcome = await verifyAndLogTurnstileScan({
           rawQr: trimmed,
-          scannerLabel: facingMode === 'user' ? 'Móvil Torno (Frontal)' : 'Móvil Torno (Trasera)',
+          scannerLabel:
+            sourceLabel ||
+            (facingMode === 'user' ? 'Móvil Torno (Frontal)' : 'Móvil Torno (Trasera)'),
           scannerUser: authUser,
           isLiveAdmin,
           localFallbackMembers: liveMembers.length > 0 ? liveMembers : localFallbackMembers,
@@ -174,7 +196,25 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
         }
         outcomeTimerRef.current = window.setTimeout(() => {
           setLastOutcome(null);
-        }, 4200);
+        }, outcome.status === 'scanner_not_connected' ? 9000 : 5500);
+      } catch (err) {
+        const now = new Date();
+        const scannedAtLabel = `${String(now.getHours()).padStart(2, '0')}:${String(
+          now.getMinutes()
+        ).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+        setLastOutcome({
+          found: false,
+          allowed: false,
+          status: 'unknown_qr',
+          title: 'ERROR AL VALIDAR QR',
+          message:
+            err instanceof Error
+              ? err.message
+              : 'No se pudo comprobar el QR ahora mismo. Revisa la conexión e inténtalo de nuevo.',
+          memberName: 'Error de red',
+          memberCode: trimmed.slice(0, 24),
+          scannedAtLabel,
+        });
       } finally {
         setIsValidating(false);
       }
@@ -189,6 +229,62 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
       onLocalScanRecorded,
       soundEnabled,
     ]
+  );
+
+  const handlePhotoFileSelected = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = '';
+      if (!file) return;
+
+      setPhotoScanStatus('Leyendo código QR de la foto...');
+      try {
+        const imageUrl = URL.createObjectURL(file);
+        const img = new Image();
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('No se pudo cargar la imagen.'));
+          img.src = imageUrl;
+        });
+
+        let decodedData: string | null = null;
+        const maxSizes = [1200, 800, 520];
+        const tempCanvas = document.createElement('canvas');
+        const ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
+
+        if (ctx) {
+          for (const maxDim of maxSizes) {
+            const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+            const w = Math.max(1, Math.round(img.naturalWidth * scale));
+            const h = Math.max(1, Math.round(img.naturalHeight * scale));
+            tempCanvas.width = w;
+            tempCanvas.height = h;
+            ctx.drawImage(img, 0, 0, w, h);
+            const imageData = ctx.getImageData(0, 0, w, h);
+            const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
+              inversionAttempts: 'attemptBoth',
+            });
+            if (decoded?.data) {
+              decodedData = decoded.data;
+              break;
+            }
+          }
+        }
+        URL.revokeObjectURL(imageUrl);
+
+        if (!decodedData) {
+          setPhotoScanStatus(
+            'No se detectó ningún QR nítido en la foto. Acércate un poco más al recuadro blanco del pase QR e inténtalo de nuevo.'
+          );
+          return;
+        }
+        setPhotoScanStatus(null);
+        await processQrString(decodedData, 'Móvil Torno (Foto QR)');
+      } catch {
+        setPhotoScanStatus('No se pudo procesar la foto del QR. Inténtalo de nuevo.');
+      }
+    },
+    [processQrString]
   );
 
   const startCamera = useCallback(
@@ -243,14 +339,14 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
         if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0) {
           const ctx = canvas.getContext('2d', { willReadFrequently: true });
           if (ctx) {
-            const w = Math.min(480, video.videoWidth);
+            const w = Math.min(640, video.videoWidth);
             const h = Math.round((video.videoHeight / video.videoWidth) * w);
             canvas.width = w;
             canvas.height = h;
             ctx.drawImage(video, 0, 0, w, h);
             const imageData = ctx.getImageData(0, 0, w, h);
             const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
-              inversionAttempts: 'dontInvert',
+              inversionAttempts: 'attemptBoth',
             });
             if (decoded?.data) {
               void processQrString(decoded.data);
@@ -334,11 +430,28 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
             }`}
           >
             {isLiveAdmin ? <Wifi className="w-3.5 h-3.5 shrink-0" /> : <WifiOff className="w-3.5 h-3.5 shrink-0" />}
-            <span className="sm:hidden">{isLiveAdmin ? 'En vivo' : 'Prueba local'}</span>
+            <span className="sm:hidden">
+              {isLiveAdmin ? `En vivo (${liveMembers.length})` : 'Sin conectar'}
+            </span>
             <span className="hidden sm:inline">
-              {isLiveAdmin ? 'Sincronizado PC' : 'Modo prueba local'}
+              {isLiveAdmin
+                ? `Sincronizado PC · ${liveMembers.length} socios`
+                : 'Modo prueba local'}
             </span>
           </span>
+
+          {isLiveAdmin && onRefreshLiveMembers && (
+            <button
+              type="button"
+              disabled={isRefreshingMembers}
+              onClick={() => void onRefreshLiveMembers()}
+              aria-label="Actualizar socios de la nube"
+              className="min-h-[40px] px-2.5 rounded-xl bg-[#0D121B] border border-white/12 flex items-center gap-1.5 text-[11px] font-semibold text-slate-200 hover:border-[#00A8FF] disabled:opacity-50 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-[#33C1FF] ${isRefreshingMembers ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">Recargar</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -355,37 +468,106 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
         </div>
       </header>
 
+      {authError && (
+        <div
+          role="alert"
+          className="bg-red-950/95 border-b border-red-500/50 px-4 py-3 text-xs text-red-100 flex items-center justify-between gap-3"
+        >
+          <span className="max-w-4xl mx-auto">{authError}</span>
+          {onDismissAuthError && (
+            <button
+              type="button"
+              onClick={onDismissAuthError}
+              className="px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/20 text-white font-semibold shrink-0 cursor-pointer"
+            >
+              Cerrar
+            </button>
+          )}
+        </div>
+      )}
+
+      {authNotice && (
+        <div
+          role="status"
+          className="bg-[#0D1A2B] border-b border-[#00A8FF]/40 px-4 py-2.5 text-xs text-sky-100 flex items-center justify-between gap-3"
+        >
+          <span className="max-w-4xl mx-auto font-medium">{authNotice.message}</span>
+          {onDismissAuthNotice && (
+            <button
+              type="button"
+              onClick={onDismissAuthNotice}
+              className="px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/20 text-white font-semibold shrink-0 cursor-pointer"
+            >
+              Cerrar
+            </button>
+          )}
+        </div>
+      )}
+
       <main className="flex-1 w-full max-w-4xl mx-auto px-4 py-5 space-y-5">
         {/* Auth Prompt for Live Sync with Reception PC */}
-        {!isLiveAdmin && (
-          <div className="rounded-2xl bg-[#0D121B] border border-[#00A8FF]/45 p-4 flex flex-col gap-3">
-            <div className="space-y-0.5">
-              <p className="text-xs font-bold text-[#33C1FF]">
-                Conecta este móvil con el ordenador de recepción
+        {!isLiveAdmin ? (
+          <div className="rounded-2xl bg-amber-950/45 border-2 border-amber-400/70 p-4 flex flex-col gap-3">
+            <div className="space-y-1">
+              <p className="text-xs font-bold text-amber-200">
+                {authUser
+                  ? `Cuenta conectada sin permisos de lector: ${authUser.email ?? 'usuario'}`
+                  : 'Conecta este móvil con Recepción para leer socios reales'}
               </p>
-              <p className="text-xs text-slate-300">
-                Elige cualquiera de las dos cuentas autorizadas del gimnasio: ambas comparten la misma
-                base de datos en vivo y registran cada entrada al instante en el PC.
+              <p className="text-xs text-slate-200 leading-relaxed">
+                {authUser
+                  ? 'Para validar Pases QR reales de socios (como Nieve o Unai), cambia a una cuenta autorizada del gimnasio:'
+                  : 'Ahora mismo este móvil está en modo prueba local y no ve a los socios reales. Inicia sesión aquí con una cuenta del gimnasio:'}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
+                disabled={isSigningIn}
                 onClick={() => void onSignInGoogle(OFFICIAL_GYM_EMAIL)}
-                className="min-h-[42px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+                className="min-h-[42px] px-4 rounded-xl bg-[#00A8FF] hover:bg-[#33C1FF] disabled:opacity-50 text-[#04070D] text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
               >
                 <LogIn className="w-4 h-4 shrink-0" />
-                Entrar: {OFFICIAL_GYM_EMAIL}
+                {isSigningIn ? 'Conectando...' : `Entrar: ${OFFICIAL_GYM_EMAIL}`}
               </button>
               <button
                 type="button"
+                disabled={isSigningIn}
                 onClick={() => void onSignInGoogle(BOOTSTRAPPED_OWNER_EMAIL)}
-                className="min-h-[42px] px-4 rounded-xl bg-[#111927] hover:bg-[#19253A] border border-[#00A8FF]/40 text-[#E2F3FF] text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+                className="min-h-[42px] px-4 rounded-xl bg-[#111927] hover:bg-[#19253A] disabled:opacity-50 border border-[#00A8FF]/40 text-[#E2F3FF] text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
               >
                 <LogIn className="w-4 h-4 shrink-0 text-[#33C1FF]" />
                 Entrar: {BOOTSTRAPPED_OWNER_EMAIL}
               </button>
+              {authUser && onSignOutGoogle && (
+                <button
+                  type="button"
+                  onClick={() => void onSignOutGoogle()}
+                  className="min-h-[42px] px-3.5 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-semibold text-white flex items-center gap-1.5 cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  Cerrar sesión
+                </button>
+              )}
             </div>
+          </div>
+        ) : (
+          <div className="rounded-xl bg-emerald-950/35 border border-emerald-500/35 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="text-emerald-200 font-medium">
+              Lector conectado en vivo como{' '}
+              <strong className="text-white">{authUser?.email}</strong> ·{' '}
+              <strong className="text-emerald-300">{liveMembers.length}</strong> socios reales
+              cargados
+            </span>
+            {onSignOutGoogle && (
+              <button
+                type="button"
+                onClick={() => void onSignOutGoogle()}
+                className="text-[11px] text-slate-300 hover:text-white underline cursor-pointer"
+              >
+                Cambiar cuenta
+              </button>
+            )}
           </div>
         )}
 
@@ -403,7 +585,24 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
               </h1>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={photoInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={(e) => void handlePhotoFileSelected(e)}
+                className="hidden"
+              />
+              <button
+                type="button"
+                disabled={isValidating}
+                onClick={() => photoInputRef.current?.click()}
+                className="min-h-[42px] px-3.5 rounded-xl bg-[#131B28] hover:bg-white/10 border border-[#00A8FF]/45 text-xs font-semibold text-[#E2F3FF] flex items-center gap-1.5 cursor-pointer"
+              >
+                <ImagePlus className="w-4 h-4 text-[#33C1FF]" />
+                Hacer foto al QR
+              </button>
               {cameraActive ? (
                 <>
                   <button
@@ -438,6 +637,15 @@ export const TurnstileScannerView: React.FC<TurnstileScannerViewProps> = ({
               )}
             </div>
           </div>
+
+          {photoScanStatus && (
+            <div
+              role="status"
+              className="rounded-xl bg-[#0B1524] border border-[#00A8FF]/40 px-4 py-2.5 text-xs text-sky-100"
+            >
+              {photoScanStatus}
+            </div>
+          )}
 
           {/* High-Contrast Access Result Banner (GREEN ALLOWED / RED OVERDUE ALARM) */}
           {lastOutcome && (

@@ -300,6 +300,87 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidPushSubscription(data) {
+      return data.keys().hasAll([
+          'subId',
+          'uid',
+          'endpoint',
+          'p256dh',
+          'auth',
+          'platform',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'subId',
+          'uid',
+          'endpoint',
+          'p256dh',
+          'auth',
+          'platform',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.subId)
+        && data.subId.size() >= 4
+        && isValidId(data.uid)
+        && data.endpoint is string
+        && data.endpoint.size() >= 20
+        && data.endpoint.size() <= 1000
+        && data.endpoint.matches('^https://.*$')
+        && data.p256dh is string
+        && data.p256dh.size() >= 20
+        && data.p256dh.size() <= 256
+        && data.auth is string
+        && data.auth.size() >= 10
+        && data.auth.size() <= 128
+        && data.platform in ['ios', 'android', 'desktop', 'other']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStaffPushSubscription(data) {
+      return data.keys().hasAll([
+          'subId',
+          'uid',
+          'role',
+          'endpoint',
+          'p256dh',
+          'auth',
+          'platform',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'subId',
+          'uid',
+          'role',
+          'endpoint',
+          'p256dh',
+          'auth',
+          'platform',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.subId)
+        && data.subId.size() >= 4
+        && isValidId(data.uid)
+        && data.role == 'staff'
+        && data.endpoint is string
+        && data.endpoint.size() >= 20
+        && data.endpoint.size() <= 1000
+        && data.endpoint.matches('^https://.*$')
+        && data.p256dh is string
+        && data.p256dh.size() >= 20
+        && data.p256dh.size() <= 256
+        && data.auth is string
+        && data.auth.size() >= 10
+        && data.auth.size() <= 128
+        && data.platform in ['ios', 'android', 'desktop', 'other']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // ---------------------------------------------------------
     // 1. Authorized Staff & Scanner Operators (/admins/{adminUid})
     // ---------------------------------------------------------
@@ -434,6 +515,62 @@ service cloud.firestore {
           && (isAdmin() || isOwner(memberId));
         allow delete: if isValidId(memberId) && isValidId(docId) && isAdmin();
       }
+
+      // Member Web Push Subscriptions (Master Gate via parent exists(), zero PII)
+      match /pushSubscriptions/{subId} {
+        allow get: if isValidId(memberId) && isValidId(subId) && (isOwner(memberId) || isAdmin());
+        allow list: if isAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+        allow create: if isValidId(memberId)
+          && isValidId(subId)
+          && isVerified()
+          && isValidPushSubscription(incoming())
+          && incoming().subId == subId
+          && incoming().uid == memberId
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && (isOwner(memberId) || isAdmin())
+          && exists(/databases/$(database)/documents/members/$(memberId));
+        allow update: if isValidId(memberId)
+          && isValidId(subId)
+          && isVerified()
+          && isValidPushSubscription(incoming())
+          && incoming().subId == existing().subId
+          && incoming().uid == existing().uid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['endpoint', 'p256dh', 'auth', 'platform', 'updatedAt'])
+          && (isOwner(memberId) || isAdmin())
+          && exists(/databases/$(database)/documents/members/$(memberId));
+        allow delete: if isValidId(memberId) && isValidId(subId) && (isOwner(memberId) || isAdmin());
+      }
+    }
+
+    // ---------------------------------------------------------
+    // 2B. Staff Web Push Subscriptions (/staffPushSubscriptions/{subId})
+    // ---------------------------------------------------------
+    match /staffPushSubscriptions/{subId} {
+      allow get: if isValidId(subId) && isVerified();
+      allow list: if isVerified() && existing().role == 'staff';
+      allow create: if isValidId(subId)
+        && isVerified()
+        && isValidStaffPushSubscription(incoming())
+        && incoming().subId == subId
+        && incoming().uid == request.auth.uid
+        && incoming().role == 'staff'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isAdmin();
+      allow update: if isValidId(subId)
+        && isVerified()
+        && isValidStaffPushSubscription(incoming())
+        && incoming().subId == existing().subId
+        && incoming().uid == existing().uid
+        && incoming().role == existing().role
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['endpoint', 'p256dh', 'auth', 'platform', 'updatedAt'])
+        && isAdmin();
+      allow delete: if isValidId(subId) && isAdmin();
     }
 
     // ---------------------------------------------------------

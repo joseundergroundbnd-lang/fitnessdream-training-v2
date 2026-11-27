@@ -69,6 +69,43 @@ export function parseMemberQrPayload(rawInput: string): ParsedQrPayload {
 }
 
 /**
+ * Matches a parsed FitnessDreams QR payload against a list of members.
+ * Checks exact document ID / UID first (ignoring the 'current-user' local placeholder),
+ * then falls back to normalized memberCode (e.g. FD-4821) so scans work even if a member
+ * opened their QR before local state finished syncing.
+ */
+export function matchMemberForQrPayload<
+  T extends { id: string; uid?: string; memberCode: string },
+>(parsed: ParsedQrPayload, members: T[]): T | null {
+  if (!parsed.valid || members.length === 0) return null;
+
+  const targetId =
+    parsed.memberId && parsed.memberId !== 'current-user' ? parsed.memberId.trim() : null;
+  const targetCode = parsed.memberCode ? sanitizeMemberCode(parsed.memberCode) : null;
+
+  if (targetId) {
+    const byId = members.find((m) => m.id === targetId || m.uid === targetId);
+    if (byId) return byId;
+  }
+
+  if (targetCode) {
+    const byCode = members.find((m) => sanitizeMemberCode(m.memberCode) === targetCode);
+    if (byCode) return byCode;
+  }
+
+  // Case-insensitive ID fallback (for manual typing of UIDs)
+  if (targetId) {
+    const lowerId = targetId.toLowerCase();
+    const byInsensitiveId = members.find(
+      (m) => m.id.toLowerCase() === lowerId || (m.uid && m.uid.toLowerCase() === lowerId)
+    );
+    if (byInsensitiveId) return byInsensitiveId;
+  }
+
+  return null;
+}
+
+/**
  * Generates a short deterministic uppercase member code like "FD-4821" from a Firebase UID.
  */
 export function generateMemberCodeFromUid(uid: string): string {

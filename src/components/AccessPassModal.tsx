@@ -11,7 +11,11 @@ import {
 } from 'lucide-react';
 import type { FeeStatus, MemberProfile } from '../types/gym';
 import { evaluateTurnstileAccess } from '../utils/gymLogic';
-import { buildMemberQrPayload, sanitizeMemberCode } from '../utils/qrPass';
+import {
+  buildMemberQrPayload,
+  generateMemberCodeFromUid,
+  sanitizeMemberCode,
+} from '../utils/qrPass';
 import { BrandLogo } from './BrandLogo';
 import { RealQrCode } from './RealQrCode';
 
@@ -19,6 +23,7 @@ interface AccessPassModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: MemberProfile;
+  authUserUid?: string | null;
   onCheckIn: () => void;
   onSetFeeStatus: (status: FeeStatus) => void;
   isCloudSynced?: boolean;
@@ -29,6 +34,7 @@ export const AccessPassModal: React.FC<AccessPassModalProps> = ({
   isOpen,
   onClose,
   profile,
+  authUserUid = null,
   onCheckIn,
   onSetFeeStatus,
   isCloudSynced = false,
@@ -50,8 +56,12 @@ export const AccessPassModal: React.FC<AccessPassModalProps> = ({
 
   if (!isOpen) return null;
 
-  const memberCode = sanitizeMemberCode(profile.founderNumber);
-  const memberUid = profile.memberId || 'current-user';
+  const memberUid = authUserUid || profile.memberId || 'current-user';
+  const rawCode = profile.founderNumber?.trim() || '';
+  const memberCode =
+    authUserUid && (!rawCode || rawCode === '#0042' || rawCode === 'FD-0042')
+      ? generateMemberCodeFromUid(authUserUid)
+      : sanitizeMemberCode(rawCode);
   const qrPayload = buildMemberQrPayload(memberUid, memberCode);
   const isOverdue = profile.feeStatus === 'pendiente';
   const accessEvaluation = evaluateTurnstileAccess(profile.feeStatus);
@@ -221,15 +231,15 @@ export const AccessPassModal: React.FC<AccessPassModalProps> = ({
           >
             <RealQrCode
               value={qrPayload}
-              size={200}
-              fgColor={alarmTriggered || isOverdue ? '#991B1B' : '#06080D'}
+              size={208}
+              fgColor="#06080D"
               label={`Código QR de acceso ${memberCode}`}
             />
 
             <div className="mt-2.5 flex items-center gap-2 text-xs text-slate-700 font-mono tabular-nums">
               <span className="font-bold">{memberCode}</span>
               <span aria-hidden="true">·</span>
-              <span>Listo para el móvil lector</span>
+              <span>{isOverdue ? 'Cuota pendiente · Lector avisará en rojo' : 'Listo para el móvil lector'}</span>
             </div>
           </div>
 

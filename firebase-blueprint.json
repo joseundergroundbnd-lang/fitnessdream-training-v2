@@ -413,6 +413,106 @@
         }
       },
       "required": ["staffId", "email", "label", "role", "addedByUid", "createdAt", "updatedAt"]
+    },
+    "PushSubscription": {
+      "title": "PushSubscription",
+      "description": "Web Push (RFC 8291 VAPID) device subscription for a gym member (iOS Home Screen PWA, Android Chrome, or Desktop). Contains zero PII.",
+      "type": "object",
+      "properties": {
+        "subId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 1000,
+          "pattern": "^https://.*$"
+        },
+        "p256dh": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 256
+        },
+        "auth": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 128
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["ios", "android", "desktop", "other"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["subId", "uid", "endpoint", "p256dh", "auth", "platform", "createdAt", "updatedAt"]
+    },
+    "StaffPushSubscription": {
+      "title": "StaffPushSubscription",
+      "description": "Web Push (RFC 8291 VAPID) device subscription for authorized gym staff (Reception PC, Coach Javi, Coach Joel). Contains zero PII.",
+      "type": "object",
+      "properties": {
+        "subId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["staff"]
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 1000,
+          "pattern": "^https://.*$"
+        },
+        "p256dh": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 256
+        },
+        "auth": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 128
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["ios", "android", "desktop", "other"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["subId", "uid", "role", "endpoint", "p256dh", "auth", "platform", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -431,6 +531,14 @@
     "/members/{memberId}/private/{docId}": {
       "schema": { "$ref": "#/entities/MemberPrivateContact" },
       "description": "PII-isolated private contact info (email, phone) readable only by the member owner or admin."
+    },
+    "/members/{memberId}/pushSubscriptions/{subId}": {
+      "schema": { "$ref": "#/entities/PushSubscription" },
+      "description": "Member Web Push subscriptions for background/closed-app iOS & Android alerts."
+    },
+    "/staffPushSubscriptions/{subId}": {
+      "schema": { "$ref": "#/entities/StaffPushSubscription" },
+      "description": "Authorized gym & coach Web Push subscriptions for background new-member and incoming chat alerts."
     },
     "/accessLogs/{logId}": {
       "schema": { "$ref": "#/entities/AccessLog" },

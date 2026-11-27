@@ -68,8 +68,26 @@ test('Dirty Dozen #12: Direct messages prevent coach impersonation and cross-mem
 });
 
 test('Every collection in firebase-blueprint.json has an explicit match block in rules', () => {
-  const expectedMatches = ['admins', 'members', 'private', 'accessLogs', 'coachRoutines', 'directMessages'];
+  const expectedMatches = [
+    'admins',
+    'authorizedStaff',
+    'members',
+    'private',
+    'pushSubscriptions',
+    'staffPushSubscriptions',
+    'accessLogs',
+    'coachRoutines',
+    'directMessages',
+  ];
   for (const col of expectedMatches) {
     assert.ok(rulesText.includes(`match /${col}/`), `Missing match block for collection /${col}/`);
   }
+});
+
+test('Push subscriptions enforce HTTPS endpoints, owner/admin write isolation, and Master Gate', () => {
+  assert.match(rulesText, /function isValidPushSubscription\(data\)/);
+  assert.match(rulesText, /function isValidStaffPushSubscription\(data\)/);
+  assert.match(rulesText, /data\.endpoint\.matches\('\^https:\/\/\.\*\$'\)/);
+  assert.match(rulesText, /match \/pushSubscriptions\/\{subId\}/);
+  assert.match(rulesText, /match \/staffPushSubscriptions\/\{subId\}/);
 });

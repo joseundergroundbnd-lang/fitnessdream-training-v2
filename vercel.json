@@ -5,7 +5,7 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
-      "source": "/((?!assets/|src/assets/|dossier/|pwa-.*\\.png|apple-touch-icon\\.png|sw\\.js|registerSW\\.js|workbox-.*\\.js|manifest\\.webmanifest).*)",
+      "source": "/((?!api/|assets/|src/assets/|dossier/|icon-pedestal-.*\\.png|pwa-.*\\.png|apple-touch-icon\\.png|sw\\.js|registerSW\\.js|workbox-.*\\.js|manifest\\.webmanifest).*)",
       "destination": "/index.html"
     }
   ]

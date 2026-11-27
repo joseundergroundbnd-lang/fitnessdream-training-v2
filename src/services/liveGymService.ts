@@ -26,6 +26,7 @@ import { evaluateTurnstileAccess } from '../utils/gymLogic';
 import {
   clampText,
   generateMemberCodeFromUid,
+  matchMemberForQrPayload,
   normalizeFeeStatus,
   parseMemberQrPayload,
   sanitizeId,
@@ -113,7 +114,7 @@ export interface LiveDirectMessageDoc {
 export interface TurnstileScanOutcome {
   found: boolean;
   allowed: boolean;
-  status: 'granted' | 'blocked_fee_overdue' | 'unknown_qr';
+  status: 'granted' | 'blocked_fee_overdue' | 'scanner_not_connected' | 'unknown_qr';
   title: string;
   message: string;
   memberName: string;
@@ -651,9 +652,16 @@ export async function verifyAndLogTurnstileScan(params: {
 
   // 1. Live Firestore lookup when authenticated as admin/scanner
   if (params.scannerUser && params.isLiveAdmin) {
-    try {
-      if (parsed.memberId) {
-        const snap = await getDoc(doc(db, 'members', sanitizeId(parsed.memberId)));
+    // 1a. Direct document lookup from server first (guarantees fresh feeStatus, zero index needed)
+    if (parsed.memberId && parsed.memberId !== 'current-user') {
+      try {
+        const ref = doc(db, 'members', sanitizeId(parsed.memberId));
+        let snap;
+        try {
+          snap = await getDocFromServer(ref);
+        } catch {
+          snap = await getDoc(ref);
+        }
         if (snap.exists()) {
           const d = snap.data();
           matchedMember = {
@@ -675,61 +683,56 @@ export async function verifyAndLogTurnstileScan(params: {
           };
           cameFromFirestore = true;
         }
+      } catch (error) {
+        console.warn('[FitnessDreams] Aviso en lectura directa QR por UID:', error);
       }
+    }
 
-      if (!matchedMember && parsed.memberCode) {
-        const q = query(
-          collection(db, 'members'),
-          where('memberCode', '==', sanitizeMemberCode(parsed.memberCode)),
-          limit(1)
-        );
-        const qSnap = await getDocs(q);
-        if (!qSnap.empty) {
-          const snap = qSnap.docs[0];
-          const d = snap.data();
-          matchedMember = {
-            id: snap.id,
-            uid: String(d.uid ?? snap.id),
-            memberCode: String(d.memberCode ?? 'FD-0001'),
-            name: String(d.name ?? 'Socio'),
-            tier: d.tier === 'Socio Club' ? 'Socio Club' : 'Socio Fundador',
-            goal: String(d.goal ?? ''),
-            feeStatus: normalizeFeeStatus(d.feeStatus),
-            monthlyFee: Number(d.monthlyFee ?? 34.9),
-            streakDays: Number(d.streakDays ?? 0),
-            totalCheckIns: Number(d.totalCheckIns ?? 0),
-            lastCheckInLabel: String(d.lastCheckInLabel ?? ''),
-            daysSinceLastVisit: Number(d.daysSinceLastVisit ?? 0),
-            outreachStatus: (d.outreachStatus as LiveGymMember['outreachStatus']) ?? 'pendiente',
-            assignedCoach: String(d.assignedCoach ?? 'Javi Busta'),
-            isRealMember: Boolean(d.isRealMember ?? true),
-          };
+    // 1b. Live full-collection server lookup by ID/UID/memberCode (works on Firestore Enterprise without manual indexes)
+    if (!matchedMember) {
+      try {
+        const serverMembers = await fetchAllLiveMembersFromServer();
+        const foundInServer = matchMemberForQrPayload(parsed, serverMembers);
+        if (foundInServer) {
+          matchedMember = foundInServer;
           cameFromFirestore = true;
         }
+      } catch (error) {
+        console.warn('[FitnessDreams] Aviso consultando directorio de socios en servidor para QR:', error);
       }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.GET, 'members');
     }
   }
 
-  // 2. Fallback to local state members (for instant demo testing before Google sign-in)
+  // 2. Fallback to already-synced members in memory (liveMembers when connected, or local demo when offline)
   if (!matchedMember) {
-    matchedMember =
-      params.localFallbackMembers.find(
-        (m) =>
-          (parsed.memberId && (m.id === parsed.memberId || m.uid === parsed.memberId)) ||
-          (parsed.memberCode &&
-            sanitizeMemberCode(m.memberCode) === sanitizeMemberCode(parsed.memberCode))
-      ) ?? null;
+    matchedMember = matchMemberForQrPayload(parsed, params.localFallbackMembers);
+    if (matchedMember && params.scannerUser && params.isLiveAdmin) {
+      cameFromFirestore = !matchedMember.id.startsWith('demo_') && !matchedMember.id.startsWith('local_');
+    }
   }
 
   if (!matchedMember) {
+    if (!params.isLiveAdmin) {
+      return {
+        found: false,
+        allowed: false,
+        status: 'scanner_not_connected',
+        title: 'LECTOR SIN CONECTAR A RECEPCIÓN',
+        message: params.scannerUser
+          ? `Has entrado con ${params.scannerUser.email ?? 'una cuenta de socio'}, que no tiene permisos de lector. Pulsa "Cambiar cuenta" arriba y entra con fitnessdreamsbenidorm@gmail.com o joseundergroundbnd@gmail.com.`
+          : 'Este móvil lector está en modo prueba local y no puede consultar a los socios reales. Pulsa arriba "Entrar: fitnessdreamsbenidorm@gmail.com" o "joseundergroundbnd@gmail.com" para validarlo.',
+        memberName: params.scannerUser ? 'Cuenta sin permisos de torno' : 'Modo prueba local',
+        memberCode: parsed.memberCode ?? parsed.memberId ?? '—',
+        scannedAtLabel,
+      };
+    }
+
     return {
       found: false,
       allowed: false,
       status: 'unknown_qr',
       title: 'SOCIO NO ENCONTRADO',
-      message: `No existe ningún socio activo con el código ${parsed.memberCode ?? parsed.memberId}.`,
+      message: `No existe ningún socio activo en la nube con el código ${parsed.memberCode ?? parsed.memberId}. Pide al socio que actualice su app y comprueba que esté conectado con Google.`,
       memberName: 'No registrado',
       memberCode: parsed.memberCode ?? parsed.memberId ?? '—',
       scannedAtLabel,
@@ -738,7 +741,7 @@ export async function verifyAndLogTurnstileScan(params: {
 
   const evaluation = evaluateTurnstileAccess(matchedMember.feeStatus);
 
-  // 3. Persist immutable access log & update check-in stats in Firestore when live
+  // 3. Persist immutable access log & update check-in stats in Firestore when live (non-fatal so alarm ALWAYS renders)
   if (cameFromFirestore && params.scannerUser && params.isLiveAdmin) {
     const logId = sanitizeId(`log_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
     const scannerUid = sanitizeId(params.scannerUser.uid);
@@ -771,9 +774,9 @@ export async function verifyAndLogTurnstileScan(params: {
         });
       }
 
-      await batch.commit();
+      await withCloudWriteTimeout(batch.commit(), 'registrar paso en el torno', 6000);
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `accessLogs/${logId}`);
+      console.warn(`[FitnessDreams] Aviso guardando historial de acceso ${logId}:`, error);
     }
   }
 

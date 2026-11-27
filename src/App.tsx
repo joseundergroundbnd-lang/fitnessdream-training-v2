@@ -62,6 +62,11 @@ import {
   type LiveDirectMessageDoc,
   type LiveGymMember,
 } from './services/liveGymService';
+import {
+  dispatchBackgroundPush,
+  registerDeviceForBackgroundPush,
+} from './services/webPushService';
+import { isIosBrowserNotInstalled } from './utils/webPushValidation';
 import { generateMemberCodeFromUid, sanitizeMemberCode } from './utils/qrPass';
 import {
   emailToStaffDocId,
@@ -76,8 +81,11 @@ import {
   formatIncomingRoutineNotification,
   formatNewMemberNotification,
   getNotificationPermissionState,
+  loadSeenNotificationIds,
   playNotificationChime,
   requestGymNotificationPermission,
+  saveSeenNotificationIds,
+  setAppNotificationBadge,
   shouldNotifyIncomingMessage,
   shouldNotifyNewMember,
   showGymNotification,
@@ -496,25 +504,35 @@ export default function App() {
       })
     );
 
-    // Reset hydration markers on account/role switch so historical messages never spam alerts
-    messagesHydratedRef.current = false;
-    seenLiveMsgIdsRef.current = new Set();
-    routinesHydratedRef.current = false;
-    seenLiveRoutineIdsRef.current = new Set();
+    // Restore persisted seen IDs per user so messages & routines sent while the mobile app
+    // was closed STILL notify immediately when the user reopens the app!
+    const msgSeenKey = `fd_seen_msgs_v1_${authUser.uid}`;
+    const routineSeenKey = `fd_seen_routines_v1_${authUser.uid}`;
+    const loadedMsgs = loadSeenNotificationIds(msgSeenKey);
+    const loadedRoutines = loadSeenNotificationIds(routineSeenKey);
+
+    messagesHydratedRef.current = loadedMsgs.hydrated;
+    seenLiveMsgIdsRef.current = loadedMsgs.ids;
+    routinesHydratedRef.current = loadedRoutines.hydrated;
+    seenLiveRoutineIdsRef.current = loadedRoutines.ids;
     membersHydratedRef.current = false;
     seenLiveMemberIdsRef.current = new Set();
 
-    // 2. Live routines & direct messages (with real-time incoming notification triggers)
+    // 2. Live routines & direct messages (with real-time + reopen incoming notification triggers)
     unsubs.push(
       subscribeLiveRoutines(isLiveAdmin, authUser.uid, (routines) => {
         setLiveRoutines(routines);
         if (!routinesHydratedRef.current) {
           routines.forEach((r) => seenLiveRoutineIdsRef.current.add(r.id));
           routinesHydratedRef.current = true;
+          saveSeenNotificationIds(routineSeenKey, seenLiveRoutineIdsRef.current);
           return;
         }
         const newlyArrived = routines.filter((r) => !seenLiveRoutineIdsRef.current.has(r.id));
-        newlyArrived.forEach((r) => seenLiveRoutineIdsRef.current.add(r.id));
+        if (newlyArrived.length > 0) {
+          newlyArrived.forEach((r) => seenLiveRoutineIdsRef.current.add(r.id));
+          saveSeenNotificationIds(routineSeenKey, seenLiveRoutineIdsRef.current);
+        }
         if (workspaceModeRef.current === 'socio' && newlyArrived.length > 0) {
           const latest = newlyArrived[0];
           if (latest.createdByUid !== authUser.uid) {
@@ -527,6 +545,7 @@ export default function App() {
               target: 'socio-rutinas',
               coachId: latest.coachId,
             });
+            setAppNotificationBadge(newlyArrived.length);
             playNotificationChime();
             vibrateIncomingAlert();
             void showGymNotification(payload);
@@ -543,6 +562,7 @@ export default function App() {
           if (!messagesHydratedRef.current) {
             messages.forEach((m) => seenLiveMsgIdsRef.current.add(m.id));
             messagesHydratedRef.current = true;
+            saveSeenNotificationIds(msgSeenKey, seenLiveMsgIdsRef.current);
             return;
           }
           const notifyCandidates = messages.filter((m) =>
@@ -553,7 +573,16 @@ export default function App() {
               seenIds: seenLiveMsgIdsRef.current,
             })
           );
-          messages.forEach((m) => seenLiveMsgIdsRef.current.add(m.id));
+          let addedAny = false;
+          messages.forEach((m) => {
+            if (!seenLiveMsgIdsRef.current.has(m.id)) {
+              seenLiveMsgIdsRef.current.add(m.id);
+              addedAny = true;
+            }
+          });
+          if (addedAny) {
+            saveSeenNotificationIds(msgSeenKey, seenLiveMsgIdsRef.current);
+          }
           if (notifyCandidates.length > 0) {
             const latest = notifyCandidates[notifyCandidates.length - 1];
             const payload = formatIncomingMessageNotification(latest);
@@ -565,6 +594,7 @@ export default function App() {
               target: workspaceModeRef.current === 'socio' ? 'socio-chat' : 'coach-chat',
               coachId: latest.coachId,
             });
+            setAppNotificationBadge(notifyCandidates.length);
             playNotificationChime();
             vibrateIncomingAlert();
             void showGymNotification(payload);
@@ -890,24 +920,57 @@ export default function App() {
     return [...state.directMessages.filter((m) => !liveIds.has(m.id)), ...mappedLive];
   }, [authUser, liveMessages, state.directMessages]);
 
+  // Silently keep closed-app iOS/Android Push subscription synced whenever user is signed in with permission granted
+  useEffect(() => {
+    if (!authUser || notificationPermission !== 'granted') return;
+    void registerDeviceForBackgroundPush({ user: authUser, isLiveAdmin });
+  }, [authUser, isLiveAdmin, notificationPermission]);
+
   const handleRequestNotificationPermission = async () => {
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+    const isStandalone =
+      typeof window !== 'undefined' &&
+      (window.matchMedia('(display-mode: standalone)').matches ||
+        (window.navigator as unknown as { standalone?: boolean }).standalone === true);
+
+    if (isIosBrowserNotInstalled(ua, isStandalone)) {
+      setAuthNotice({
+        tone: 'info',
+        message:
+          'En iPhone, para recibir notificaciones con la app cerrada: pulsa el botón Compartir (□↑) abajo en Safari → "Añadir a pantalla de inicio", abre la app desde el nuevo icono y pulsa "Activar avisos".',
+      });
+      return;
+    }
+
     const nextPerm = await requestGymNotificationPermission();
     setNotificationPermission(nextPerm);
     if (nextPerm === 'granted') {
       playNotificationChime();
       vibrateIncomingAlert();
+      let pushNote = '';
+      if (authUser) {
+        const pushRes = await registerDeviceForBackgroundPush({
+          user: authUser,
+          isLiveAdmin,
+        });
+        if (pushRes.status === 'subscribed') {
+          pushNote = ' Notificaciones en segundo plano (con la app cerrada) ACTIVAS en este dispositivo.';
+        } else if (pushRes.status === 'ios_install_required') {
+          pushNote =
+            ' En iPhone, añade la app a tu Pantalla de inicio para recibir avisos también con la app cerrada.';
+        }
+      }
       await showGymNotification({
         title: 'Notificaciones activadas · FitnessDreams',
         body:
           workspaceMode === 'socio'
             ? 'Te avisaremos al instante cuando tu Coach te envíe mensajes, audios o rutinas.'
-            : 'Te avisaremos al instante cuando un socio te envíe un mensaje o nota de voz.',
+            : 'Te avisaremos al instante cuando un socio se registre o envíe un mensaje.',
         tag: 'fd-permission-granted',
       });
       setAuthNotice({
         tone: 'success',
-        message:
-          'Notificaciones activadas. A partir de ahora recibirás avisos al instante cuando entren nuevos mensajes o audios.',
+        message: `Notificaciones activadas.${pushNote || ' A partir de ahora recibirás avisos al instante.'}`,
       });
     } else if (nextPerm === 'denied') {
       setAuthNotice({
@@ -921,12 +984,15 @@ export default function App() {
   const handleTestNotification = async () => {
     playNotificationChime();
     vibrateIncomingAlert();
+    if (authUser) {
+      void registerDeviceForBackgroundPush({ user: authUser, isLiveAdmin });
+    }
     const sent = await showGymNotification({
       title: 'Prueba de aviso · FitnessDreams Benidorm',
       body:
         workspaceMode === 'socio'
           ? 'Así te avisaremos cuando Coach Javi o Joel te envíen un mensaje, audio o rutina.'
-          : 'Así te avisaremos cuando un socio te envíe un mensaje o nota de voz.',
+          : 'Así te avisaremos cuando un socio se registre o envíe un mensaje.',
       tag: `fd-test-${Date.now()}`,
     });
     setAuthNotice({
@@ -1283,6 +1349,16 @@ export default function App() {
         }));
         if (isLiveAdmin || (authUser.emailVerified && isOwnerEmail(authUser.email))) {
           setLiveMembers((prev) => [synced, ...prev.filter((m) => m.id !== synced.id)]);
+        } else {
+          // Notify Reception & Coach Javi even if their app is closed
+          void dispatchBackgroundPush({
+            user: authUser,
+            targetType: 'staff',
+            title: `Nuevo socio registrado · ${synced.name}`,
+            body: `${synced.name} (${synced.memberCode} · ${synced.tier}) se acaba de registrar en FitnessDreams.`,
+            url: '/?mode=direccion',
+            tag: `fd-member-${synced.id}`,
+          });
         }
         setAuthNotice({
           tone: 'success',
@@ -1414,6 +1490,17 @@ export default function App() {
         machineCodes: routine.exercises.map((e) => e.machineCode),
         exercises: routine.exercises,
         cardioBlock: routine.cardioBlock,
+      }).then(() => {
+        const targetId = routine.targetMemberId ?? 'all';
+        void dispatchBackgroundPush({
+          user: authUser,
+          targetType: targetId === 'all' ? 'all-members' : 'member',
+          targetMemberId: targetId === 'all' ? undefined : targetId,
+          title: `Nueva rutina de Coach ${routine.coachName}`,
+          body: `${routine.frequency}: ${routine.title}. Pulsa para abrirla en Entreno.`,
+          url: '/',
+          tag: `fd-routine-${routine.id}`,
+        });
       });
     }
   };
@@ -1763,6 +1850,30 @@ export default function App() {
           msg.audioUrl && msg.audioUrl.startsWith('data:') ? msg.audioUrl : undefined,
         audioDurationSec: msg.audioDurationSec,
       });
+
+      // Dispatch closed-app background Web Push (iOS Home Screen PWA + Android + Desktop)
+      const isCoachSender = msg.senderRole === 'coach';
+      const senderLabel = isCoachSender
+        ? `Coach ${msg.senderName}`
+        : msg.senderName || 'Socio FitnessDreams';
+      const pushBody =
+        msg.kind === 'audio'
+          ? `Nota de voz (${Math.max(1, Math.round(msg.audioDurationSec ?? 5))}s). Pulsa para escucharla.`
+          : (msg.text || 'Nuevo mensaje en FitnessDreams').slice(0, 140);
+
+      void dispatchBackgroundPush({
+        user: authUser,
+        targetType: isCoachSender ? 'member' : 'staff',
+        targetMemberId: isCoachSender ? targetMemberUid : undefined,
+        title:
+          msg.kind === 'audio'
+            ? `Nueva nota de voz de ${senderLabel}`
+            : `Nuevo mensaje de ${senderLabel}`,
+        body: pushBody,
+        url: isCoachSender ? '/' : '/?mode=coach-javi',
+        tag: `fd-msg-${msgId}`,
+      });
+
       return { savedToCloud: true };
     } catch (error) {
       const errorMsg =
@@ -1925,7 +2036,15 @@ export default function App() {
       <TurnstileScannerView
         authUser={authUser}
         isLiveAdmin={isLiveAdmin}
+        isSigningIn={isSigningIn}
+        authError={authError}
+        authNotice={authNotice}
+        onDismissAuthError={() => setAuthError(null)}
+        onDismissAuthNotice={() => setAuthNotice(null)}
         onSignInGoogle={handleSignInGoogle}
+        onSignOutGoogle={handleSignOutGoogle}
+        onRefreshLiveMembers={handleRefreshLiveMembers}
+        isRefreshingMembers={isRefreshingMembers}
         liveMembers={liveMembers}
         localFallbackMembers={localDemoMembers}
         liveAccessLogs={liveAccessLogs}
@@ -2118,6 +2237,7 @@ export default function App() {
                 } else {
                   setWorkspaceMode('coach');
                 }
+                setAppNotificationBadge(0);
                 setIncomingAlert(null);
               }}
               className="min-h-[32px] px-3 rounded-lg bg-[#00A8FF] hover:bg-[#33C1FF] text-[#04070D] font-bold cursor-pointer"
@@ -2126,7 +2246,10 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setIncomingAlert(null)}
+              onClick={() => {
+                setAppNotificationBadge(0);
+                setIncomingAlert(null);
+              }}
               className="min-h-[32px] px-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white font-semibold cursor-pointer"
             >
               Cerrar
@@ -2232,7 +2355,14 @@ export default function App() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              {notificationPermission !== 'unsupported' && (
+              {(notificationPermission !== 'unsupported' ||
+                (typeof navigator !== 'undefined' &&
+                  typeof window !== 'undefined' &&
+                  isIosBrowserNotInstalled(
+                    navigator.userAgent || '',
+                    window.matchMedia('(display-mode: standalone)').matches ||
+                      (window.navigator as unknown as { standalone?: boolean }).standalone === true
+                  ))) && (
                 notificationPermission === 'granted' ? (
                   <button
                     type="button"
@@ -2519,6 +2649,7 @@ export default function App() {
         isOpen={isAccessModalOpen}
         onClose={() => setIsAccessModalOpen(false)}
         profile={state.profile}
+        authUserUid={authUser?.uid ?? null}
         onCheckIn={handleCheckIn}
         onSetFeeStatus={handleSetFeeStatus}
         isCloudSynced={Boolean(authUser)}
