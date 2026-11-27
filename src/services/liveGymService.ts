@@ -166,13 +166,40 @@ function extractFirestoreErrorCode(error: unknown): string {
   return '';
 }
 
+const FIRESTORE_WRITE_TIMEOUT_MS = 9000;
+
+async function withCloudWriteTimeout<T>(
+  operation: Promise<T>,
+  contextLabel: string,
+  timeoutMs = FIRESTORE_WRITE_TIMEOUT_MS
+): Promise<T> {
+  let timerId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => {
+      reject(
+        new Error(
+          `Firebase no respondió a tiempo al ${contextLabel} [quota-or-network-timeout]. Si has superado la cuota diaria gratuita de escrituras de Firebase (Spark), las escrituras quedan pausadas hasta el reinicio diario o hasta ampliar el plan en Firebase Console.`
+        )
+      );
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, timeoutPromise]);
+  } finally {
+    if (timerId !== undefined) clearTimeout(timerId);
+  }
+}
+
 function formatFirestoreErrorMessage(error: unknown, contextLabel: string): string {
   const code = extractFirestoreErrorCode(error);
   const rawMsg = error instanceof Error ? error.message : String(error);
   const lower = `${code} ${rawMsg}`.toLowerCase();
 
+  if (lower.includes('quota-or-network-timeout')) {
+    return rawMsg;
+  }
   if (lower.includes('resource-exhausted') || lower.includes('quota')) {
-    return `Cuota diaria gratuita de Firebase alcanzada (${code || 'quota-exceeded'}). Se reinicia mañana o puedes ampliarla en Firebase Console.`;
+    return `Cuota diaria gratuita de escrituras de Firebase alcanzada (${code || 'resource-exhausted'}). Se reinicia al día siguiente o puedes cambiar de base de datos / plan en Firebase Console.`;
   }
   if (lower.includes('permission')) {
     return `Permiso denegado en la nube al ${contextLabel} (${code || 'permission-denied'}). Asegúrate de iniciar sesión con fitnessdreamsbenidorm@gmail.com o joseundergroundbnd@gmail.com.`;
@@ -271,21 +298,27 @@ export async function addAuthorizedStaffEmail(params: {
   try {
     const existingSnap = await getDoc(ref);
     if (existingSnap.exists()) {
-      await updateDoc(ref, {
-        label: cleanLabel,
-        role: cleanRole,
-        updatedAt: serverTimestamp(),
-      });
+      await withCloudWriteTimeout(
+        updateDoc(ref, {
+          label: cleanLabel,
+          role: cleanRole,
+          updatedAt: serverTimestamp(),
+        }),
+        'actualizar el correo autorizado'
+      );
     } else {
-      await setDoc(ref, {
-        staffId,
-        email: cleanEmail,
-        label: cleanLabel,
-        role: cleanRole,
-        addedByUid: sanitizeId(params.addedByUid),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      await withCloudWriteTimeout(
+        setDoc(ref, {
+          staffId,
+          email: cleanEmail,
+          label: cleanLabel,
+          role: cleanRole,
+          addedByUid: sanitizeId(params.addedByUid),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }),
+        'guardar el correo autorizado'
+      );
     }
     return {
       staffId,
@@ -296,16 +329,19 @@ export async function addAuthorizedStaffEmail(params: {
       isCloudSynced: true,
     };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `authorizedStaff/${staffId}`);
+    throw new Error(formatFirestoreErrorMessage(error, 'autorizar el correo en la nube'));
   }
 }
 
 export async function removeAuthorizedStaffEmail(staffId: string): Promise<void> {
   const cleanId = sanitizeId(staffId);
   try {
-    await deleteDoc(doc(db, 'authorizedStaff', cleanId));
+    await withCloudWriteTimeout(
+      deleteDoc(doc(db, 'authorizedStaff', cleanId)),
+      'quitar el correo autorizado'
+    );
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, `authorizedStaff/${cleanId}`);
+    throw new Error(formatFirestoreErrorMessage(error, 'quitar el correo autorizado'));
   }
 }
 
@@ -342,33 +378,40 @@ export async function upsertSignedInMemberProfile(
       const monthlyFee = cleanTier === 'Socio Fundador' ? 34.9 : 46.9;
 
       // 1. Write the main /members/{uid} document first so it can never be rolled back by PII subdoc writes
-      await setDoc(memberRef, {
-        uid,
-        memberCode,
-        name: cleanName,
-        tier: cleanTier,
-        goal: cleanGoal,
-        feeStatus: 'al-dia',
-        monthlyFee,
-        streakDays: 1,
-        totalCheckIns: 0,
-        lastCheckInLabel: 'Recién registrado',
-        daysSinceLastVisit: 0,
-        outreachStatus: 'pendiente',
-        assignedCoach: 'Javi Busta',
-        isRealMember: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      await withCloudWriteTimeout(
+        setDoc(memberRef, {
+          uid,
+          memberCode,
+          name: cleanName,
+          tier: cleanTier,
+          goal: cleanGoal,
+          feeStatus: 'al-dia',
+          monthlyFee,
+          streakDays: 1,
+          totalCheckIns: 0,
+          lastCheckInLabel: 'Recién registrado',
+          daysSinceLastVisit: 0,
+          outreachStatus: 'pendiente',
+          assignedCoach: 'Javi Busta',
+          isRealMember: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }),
+        'registrar tu ficha de socio'
+      );
 
       // 2. Write isolated PII contact subdocument (non-blocking if rules/network reject subdoc)
       try {
-        await setDoc(privateRef, {
-          uid,
-          email: cleanEmail,
-          phone: cleanPhone,
-          updatedAt: serverTimestamp(),
-        });
+        await withCloudWriteTimeout(
+          setDoc(privateRef, {
+            uid,
+            email: cleanEmail,
+            phone: cleanPhone,
+            updatedAt: serverTimestamp(),
+          }),
+          'guardar contacto privado',
+          5000
+        );
       } catch (contactErr) {
         console.warn('[FitnessDreams] Aviso guardando contacto privado de socio:', contactErr);
       }
@@ -395,27 +438,38 @@ export async function upsertSignedInMemberProfile(
     }
 
     // Update only Tier-2 allowed profile fields so member never touches feeStatus
-    await updateDoc(memberRef, {
-      name: cleanName,
-      goal: cleanGoal,
-      tier: cleanTier,
-      updatedAt: serverTimestamp(),
-    });
+    await withCloudWriteTimeout(
+      updateDoc(memberRef, {
+        name: cleanName,
+        goal: cleanGoal,
+        tier: cleanTier,
+        updatedAt: serverTimestamp(),
+      }),
+      'actualizar tu perfil de socio'
+    );
     try {
       const existingPrivate = await getDoc(privateRef);
       if (existingPrivate.exists()) {
-        await updateDoc(privateRef, {
-          email: cleanEmail,
-          phone: cleanPhone,
-          updatedAt: serverTimestamp(),
-        });
+        await withCloudWriteTimeout(
+          updateDoc(privateRef, {
+            email: cleanEmail,
+            phone: cleanPhone,
+            updatedAt: serverTimestamp(),
+          }),
+          'actualizar contacto privado',
+          5000
+        );
       } else {
-        await setDoc(privateRef, {
-          uid,
-          email: cleanEmail,
-          phone: cleanPhone,
-          updatedAt: serverTimestamp(),
-        });
+        await withCloudWriteTimeout(
+          setDoc(privateRef, {
+            uid,
+            email: cleanEmail,
+            phone: cleanPhone,
+            updatedAt: serverTimestamp(),
+          }),
+          'guardar contacto privado',
+          5000
+        );
       }
     } catch (contactErr) {
       console.warn('[FitnessDreams] Aviso actualizando contacto privado:', contactErr);
@@ -474,24 +528,27 @@ export async function createWalkInPilotMember(input: {
 
   try {
     // 1. Write the main member document directly (no writeBatch / existsAfter failure risk)
-    await setDoc(memberRef, {
-      uid: memberId,
-      memberCode,
-      name: cleanName,
-      tier: cleanTier,
-      goal: 'Alta en recepción',
-      feeStatus,
-      monthlyFee,
-      streakDays: 0,
-      totalCheckIns: 0,
-      lastCheckInLabel: 'Alta en mostrador',
-      daysSinceLastVisit: 0,
-      outreachStatus: 'pendiente',
-      assignedCoach: cleanCoach,
-      isRealMember: true,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
+    await withCloudWriteTimeout(
+      setDoc(memberRef, {
+        uid: memberId,
+        memberCode,
+        name: cleanName,
+        tier: cleanTier,
+        goal: 'Alta en recepción',
+        feeStatus,
+        monthlyFee,
+        streakDays: 0,
+        totalCheckIns: 0,
+        lastCheckInLabel: 'Alta en mostrador',
+        daysSinceLastVisit: 0,
+        outreachStatus: 'pendiente',
+        assignedCoach: cleanCoach,
+        isRealMember: true,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      }),
+      'dar de alta al nuevo socio'
+    );
 
     // 2. Verify document actually persisted on Firestore servers
     const verifiedSnap = await getDocFromServer(memberRef);
@@ -501,12 +558,16 @@ export async function createWalkInPilotMember(input: {
 
     // 3. Persist private contact details separately (never rolls back the member doc)
     try {
-      await setDoc(privateRef, {
-        uid: memberId,
-        email: cleanEmail,
-        phone: cleanPhone,
-        updatedAt: serverTimestamp(),
-      });
+      await withCloudWriteTimeout(
+        setDoc(privateRef, {
+          uid: memberId,
+          email: cleanEmail,
+          phone: cleanPhone,
+          updatedAt: serverTimestamp(),
+        }),
+        'guardar contacto privado del alta',
+        5000
+      );
     } catch (contactErr) {
       console.warn('[FitnessDreams] Aviso guardando contacto privado del alta:', contactErr);
     }
@@ -542,14 +603,16 @@ export async function createWalkInPilotMember(input: {
  */
 export async function setLiveMemberFeeStatus(memberId: string, feeStatus: FeeStatus): Promise<void> {
   const cleanId = sanitizeId(memberId);
-  const path = `members/${cleanId}`;
   try {
-    await updateDoc(doc(db, 'members', cleanId), {
-      feeStatus: normalizeFeeStatus(feeStatus),
-      updatedAt: serverTimestamp(),
-    });
+    await withCloudWriteTimeout(
+      updateDoc(doc(db, 'members', cleanId), {
+        feeStatus: normalizeFeeStatus(feeStatus),
+        updatedAt: serverTimestamp(),
+      }),
+      'cambiar el estado de cuota'
+    );
   } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, path);
+    throw new Error(formatFirestoreErrorMessage(error, 'cambiar el estado de cuota'));
   }
 }
 
@@ -825,9 +888,13 @@ export async function publishLiveRoutine(params: {
   }
 
   try {
-    await setDoc(doc(db, 'coachRoutines', routineId), payload);
+    await withCloudWriteTimeout(
+      setDoc(doc(db, 'coachRoutines', routineId), payload),
+      'enviar la rutina a la nube'
+    );
   } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `coachRoutines/${routineId}`);
+    console.error(`[FitnessDreams] Error publicando rutina coachRoutines/${routineId}:`, error);
+    throw new Error(formatFirestoreErrorMessage(error, 'enviar la rutina'));
   }
 }
 
@@ -878,7 +945,10 @@ export async function sendLiveMessage(params: {
   }
 
   try {
-    await setDoc(doc(db, 'directMessages', msgId), payload);
+    await withCloudWriteTimeout(
+      setDoc(doc(db, 'directMessages', msgId), payload),
+      params.kind === 'audio' ? 'enviar el audio' : 'enviar el mensaje'
+    );
   } catch (error) {
     console.error('[FitnessDreams] Error enviando mensaje a Firestore:', error);
     const rawMsg = error instanceof Error ? error.message : String(error);
@@ -889,7 +959,12 @@ export async function sendLiveMessage(params: {
           : 'Permiso denegado en la nube: vuelve a iniciar sesión con tu cuenta de Google verificada para enviar mensajes a tu Coach.'
       );
     }
-    throw new Error(`No se pudo enviar a la nube (${rawMsg}). Revisa tu conexión e inténtalo de nuevo.`);
+    throw new Error(
+      formatFirestoreErrorMessage(
+        error,
+        params.kind === 'audio' ? 'enviar el audio' : 'enviar el mensaje'
+      )
+    );
   }
 }
 

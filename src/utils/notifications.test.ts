@@ -3,7 +3,9 @@ import test from 'node:test';
 import {
   formatIncomingMessageNotification,
   formatIncomingRoutineNotification,
+  formatNewMemberNotification,
   shouldNotifyIncomingMessage,
+  shouldNotifyNewMember,
 } from './notifications';
 
 test('shouldNotifyIncomingMessage notifies coach when a member sends a new message', () => {
@@ -105,4 +107,52 @@ test('formatIncomingRoutineNotification includes coach name and frequency', () =
   });
   assert.equal(notif.title, 'Nueva rutina de Coach Javi Busta');
   assert.match(notif.body, /Semanal: Pecho y Espalda Telju/);
+});
+
+test('shouldNotifyNewMember and formatNewMemberNotification alert Reception and Coach Javi only for newly joined members', () => {
+  const seen = new Set<string>(['uid-old']);
+  assert.equal(
+    shouldNotifyNewMember({
+      viewerMode: 'direccion',
+      member: { id: 'uid-new', uid: 'uid-new' },
+      currentUid: 'uid-admin',
+      seenIds: seen,
+    }),
+    true
+  );
+  assert.equal(
+    shouldNotifyNewMember({
+      viewerMode: 'coach',
+      member: { id: 'uid-new', uid: 'uid-new' },
+      currentUid: 'uid-admin',
+      seenIds: seen,
+    }),
+    true
+  );
+  assert.equal(
+    shouldNotifyNewMember({
+      viewerMode: 'socio',
+      member: { id: 'uid-new', uid: 'uid-new' },
+      currentUid: 'uid-admin',
+      seenIds: seen,
+    }),
+    false
+  );
+  assert.equal(
+    shouldNotifyNewMember({
+      viewerMode: 'direccion',
+      member: { id: 'uid-old', uid: 'uid-old' },
+      currentUid: 'uid-admin',
+      seenIds: seen,
+    }),
+    false
+  );
+  const payload = formatNewMemberNotification({
+    id: 'uid-new',
+    name: 'Carlos Pérez',
+    memberCode: 'FD-8821',
+    tier: 'Socio Fundador',
+  });
+  assert.equal(payload.title, 'Nuevo socio registrado · Carlos Pérez');
+  assert.match(payload.body, /FD-8821/);
 });

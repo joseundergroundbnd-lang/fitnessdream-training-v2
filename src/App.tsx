@@ -74,10 +74,12 @@ import {
 import {
   formatIncomingMessageNotification,
   formatIncomingRoutineNotification,
+  formatNewMemberNotification,
   getNotificationPermissionState,
   playNotificationChime,
   requestGymNotificationPermission,
   shouldNotifyIncomingMessage,
+  shouldNotifyNewMember,
   showGymNotification,
   vibrateIncomingAlert,
   type NotificationPermissionState,
@@ -297,7 +299,7 @@ export default function App() {
     title: string;
     body: string;
     actionLabel: string;
-    target: 'socio-chat' | 'socio-rutinas' | 'coach-chat';
+    target: 'socio-chat' | 'socio-rutinas' | 'coach-chat' | 'admin-nuevo-socio';
     coachId?: string;
   } | null>(null);
   const [requestedWorkoutSubtab, setRequestedWorkoutSubtab] = useState<
@@ -308,6 +310,8 @@ export default function App() {
   const messagesHydratedRef = useRef<boolean>(false);
   const seenLiveRoutineIdsRef = useRef<Set<string>>(new Set());
   const routinesHydratedRef = useRef<boolean>(false);
+  const seenLiveMemberIdsRef = useRef<Set<string>>(new Set());
+  const membersHydratedRef = useRef<boolean>(false);
   const autoCreatedSelfUidRef = useRef<string | null>(null);
   const syncingWalkInIdsRef = useRef<Set<string>>(new Set());
   const profileRef = useRef<MemberProfile>(state.profile);
@@ -497,6 +501,8 @@ export default function App() {
     seenLiveMsgIdsRef.current = new Set();
     routinesHydratedRef.current = false;
     seenLiveRoutineIdsRef.current = new Set();
+    membersHydratedRef.current = false;
+    seenLiveMemberIdsRef.current = new Set();
 
     // 2. Live routines & direct messages (with real-time incoming notification triggers)
     unsubs.push(
@@ -580,6 +586,10 @@ export default function App() {
       void fetchAllLiveMembersFromServer()
         .then((serverMembers) => {
           if (activeEffect) {
+            if (!membersHydratedRef.current) {
+              serverMembers.forEach((m) => seenLiveMemberIdsRef.current.add(m.id));
+              membersHydratedRef.current = true;
+            }
             setLiveMembers(serverMembers);
           }
         })
@@ -597,12 +607,45 @@ export default function App() {
         activeEffect = false;
       });
       unsubs.push(
-        subscribeAllLiveMembers(setLiveMembers, (membersErr) => {
-          setAuthNotice({
-            tone: 'warning',
-            message: `Aviso al cargar socios de la nube: ${membersErr}`,
-          });
-        })
+        subscribeAllLiveMembers(
+          (members) => {
+            setLiveMembers(members);
+            if (!membersHydratedRef.current) {
+              members.forEach((m) => seenLiveMemberIdsRef.current.add(m.id));
+              membersHydratedRef.current = true;
+              return;
+            }
+            const newlyRegistered = members.filter((m) =>
+              shouldNotifyNewMember({
+                viewerMode: workspaceModeRef.current,
+                member: m,
+                currentUid: authUser.uid,
+                seenIds: seenLiveMemberIdsRef.current,
+              })
+            );
+            members.forEach((m) => seenLiveMemberIdsRef.current.add(m.id));
+            if (newlyRegistered.length > 0) {
+              const newest = newlyRegistered[0];
+              const payload = formatNewMemberNotification(newest);
+              setIncomingAlert({
+                id: newest.id,
+                title: payload.title,
+                body: payload.body,
+                actionLabel: 'Ver socio',
+                target: 'admin-nuevo-socio',
+              });
+              playNotificationChime();
+              vibrateIncomingAlert();
+              void showGymNotification(payload);
+            }
+          },
+          (membersErr) => {
+            setAuthNotice({
+              tone: 'warning',
+              message: `Aviso al cargar socios de la nube: ${membersErr}`,
+            });
+          }
+        )
       );
       unsubs.push(subscribeAuthorizedStaff(setLiveAuthorizedStaff));
     }
@@ -2070,6 +2113,8 @@ export default function App() {
                   setWorkspaceMode('socio');
                   setActiveTab('entreno');
                   setRequestedWorkoutSubtab('coach');
+                } else if (incomingAlert.target === 'admin-nuevo-socio') {
+                  setWorkspaceMode(workspaceModeRef.current === 'coach' ? 'coach' : 'direccion');
                 } else {
                   setWorkspaceMode('coach');
                 }

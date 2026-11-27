@@ -83,6 +83,33 @@ export function formatIncomingRoutineNotification(routine: {
   };
 }
 
+export function shouldNotifyNewMember(params: {
+  viewerMode: 'socio' | 'coach' | 'direccion' | 'lector';
+  member: { id: string; uid?: string };
+  currentUid?: string | null;
+  seenIds: Set<string>;
+}): boolean {
+  const { viewerMode, member, currentUid, seenIds } = params;
+  if (!member.id || seenIds.has(member.id)) return false;
+  if (viewerMode !== 'coach' && viewerMode !== 'direccion') return false;
+  if (currentUid && (member.id === currentUid || member.uid === currentUid)) return false;
+  return true;
+}
+
+export function formatNewMemberNotification(member: {
+  id: string;
+  name: string;
+  memberCode: string;
+  tier?: string;
+}): NotificationMessagePayload {
+  const cleanName = member.name.trim() || 'Nuevo socio';
+  return {
+    title: `Nuevo socio registrado · ${cleanName}`,
+    body: `${cleanName} (${member.memberCode}${member.tier ? ` · ${member.tier}` : ''}) acaba de darse de alta en FitnessDreams.`,
+    tag: `fd-member-${member.id}`,
+  };
+}
+
 export async function requestGymNotificationPermission(): Promise<NotificationPermissionState> {
   if (typeof window === 'undefined' || typeof Notification === 'undefined') {
     return 'unsupported';
@@ -164,8 +191,8 @@ export async function showGymNotification(payload: {
   const options: NotificationOptions = {
     body: payload.body,
     tag: payload.tag || `fd-alert-${Date.now()}`,
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
+    icon: '/icon-pedestal-192.png',
+    badge: '/icon-pedestal-192.png',
   };
 
   // Prefer Service Worker showNotification (works best on installed Android/iOS PWAs)
