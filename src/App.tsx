@@ -37,6 +37,7 @@ import {
   OFFICIAL_GYM_EMAIL,
   auth,
   completeGoogleRedirectSignIn,
+  isOwnerEmail,
   signInWithGoogleAccount,
   signOutGoogleAccount,
 } from './firebase';
@@ -44,6 +45,7 @@ import {
   addAuthorizedStaffEmail,
   checkIsLiveAdmin,
   createWalkInPilotMember,
+  fetchAllLiveMembersFromServer,
   publishLiveRoutine,
   removeAuthorizedStaffEmail,
   sendLiveMessage,
@@ -277,6 +279,7 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isLiveAdmin, setIsLiveAdmin] = useState(false);
+  const [isRefreshingMembers, setIsRefreshingMembers] = useState(false);
   const [liveMembers, setLiveMembers] = useState<LiveGymMember[]>([]);
   const [liveAccessLogs, setLiveAccessLogs] = useState<LiveAccessLog[]>([]);
   const [liveRoutines, setLiveRoutines] = useState<LiveCoachRoutineDoc[]>([]);
@@ -411,6 +414,9 @@ export default function App() {
         return;
       }
       setAuthError(null);
+      if (user.emailVerified && isOwnerEmail(user.email)) {
+        setIsLiveAdmin(true);
+      }
       void checkIsLiveAdmin(user).then((adminFlag) => {
         setIsLiveAdmin(adminFlag);
       });
@@ -570,6 +576,26 @@ export default function App() {
 
     // 3. Admin-only real members directory & authorized gym/coach accounts
     if (isLiveAdmin) {
+      let activeEffect = true;
+      void fetchAllLiveMembersFromServer()
+        .then((serverMembers) => {
+          if (activeEffect) {
+            setLiveMembers(serverMembers);
+          }
+        })
+        .catch((err) => {
+          if (activeEffect) {
+            setAuthNotice({
+              tone: 'warning',
+              message: `Aviso al consultar socios en el servidor: ${
+                err instanceof Error ? err.message : 'revisa tu conexión'
+              }`,
+            });
+          }
+        });
+      unsubs.push(() => {
+        activeEffect = false;
+      });
       unsubs.push(
         subscribeAllLiveMembers(setLiveMembers, (membersErr) => {
           setAuthNotice({
@@ -601,7 +627,7 @@ export default function App() {
       const syncedIds: string[] = [];
       for (const localMember of pendingWalkIns) {
         try {
-          await createWalkInPilotMember({
+          const uploaded = await createWalkInPilotMember({
             name: localMember.name,
             phone: localMember.phone || '600 000 000',
             email: localMember.email || '',
@@ -609,6 +635,9 @@ export default function App() {
             feeStatus: localMember.feeStatus,
             assignedCoach: localMember.assignedCoach || 'Javi Busta',
           });
+          if (!cancelled) {
+            setLiveMembers((prev) => [uploaded, ...prev.filter((m) => m.id !== uploaded.id)]);
+          }
           syncedIds.push(localMember.id);
         } catch (err) {
           syncingWalkInIdsRef.current.delete(localMember.id);
@@ -1023,6 +1052,46 @@ export default function App() {
     setLocalDemoFeeOverrides((prev) => ({ ...prev, [memberId]: nextStatus }));
   };
 
+  const handleRefreshLiveMembers = async (): Promise<{ count: number; error?: string }> => {
+    if (!authUser) {
+      return {
+        count: 0,
+        error: `Primero conecta con Google (${OFFICIAL_GYM_EMAIL} o ${BOOTSTRAPPED_OWNER_EMAIL}).`,
+      };
+    }
+    const effectiveAdmin = Boolean(
+      isLiveAdmin || (authUser.emailVerified && isOwnerEmail(authUser.email))
+    );
+    if (!effectiveAdmin) {
+      return {
+        count: 0,
+        error: `La cuenta ${authUser.email} no tiene permisos de Dirección/Coach para ver todos los socios.`,
+      };
+    }
+    setIsRefreshingMembers(true);
+    setAuthError(null);
+    try {
+      const fresh = await fetchAllLiveMembersFromServer();
+      setLiveMembers(fresh);
+      setAuthNotice({
+        tone: 'success',
+        message: `Lista actualizada desde Firebase: ${fresh.length} ${
+          fresh.length === 1 ? 'socio real en la nube' : 'socios reales en la nube'
+        }.`,
+      });
+      return { count: fresh.length };
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'No se pudo consultar la nube de Firebase.';
+      setAuthError(msg);
+      return { count: liveMembers.length, error: msg };
+    } finally {
+      setIsRefreshingMembers(false);
+    }
+  };
+
   const handleCreateWalkInMember = async (input: {
     name: string;
     phone: string;
@@ -1031,9 +1100,36 @@ export default function App() {
     feeStatus: FeeStatus;
     assignedCoach: string;
   }): Promise<{ savedToCloud: boolean; member: LiveGymMember }> => {
-    if (isLiveAdmin && authUser) {
-      const created = await createWalkInPilotMember(input);
-      return { savedToCloud: true, member: created };
+    const effectiveAdmin = Boolean(
+      authUser && (isLiveAdmin || (authUser.emailVerified && isOwnerEmail(authUser.email)))
+    );
+    if (effectiveAdmin && authUser) {
+      if (!isLiveAdmin) {
+        setIsLiveAdmin(true);
+      }
+      setAuthError(null);
+      try {
+        const created = await createWalkInPilotMember(input);
+        // Optimistically prepend so Reception PC and Coach Javi show the new member immediately
+        setLiveMembers((prev) => [created, ...prev.filter((m) => m.id !== created.id)]);
+        // Verify full list from Firebase server in background
+        void fetchAllLiveMembersFromServer()
+          .then((serverMembers) => {
+            const hasCreated = serverMembers.some((m) => m.id === created.id);
+            setLiveMembers(hasCreated ? serverMembers : [created, ...serverMembers]);
+          })
+          .catch(() => {
+            // Keep optimistic created member visible
+          });
+        return { savedToCloud: true, member: created };
+      } catch (err) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : 'No se pudo guardar el socio en la nube de Firebase.';
+        setAuthError(msg);
+        throw err;
+      }
     }
     const localId = `local_pilot_${Date.now()}`;
     const created: LiveGymMember = {
@@ -1142,6 +1238,9 @@ export default function App() {
             feeStatus: synced.feeStatus,
           },
         }));
+        if (isLiveAdmin || (authUser.emailVerified && isOwnerEmail(authUser.email))) {
+          setLiveMembers((prev) => [synced, ...prev.filter((m) => m.id !== synced.id)]);
+        }
         setAuthNotice({
           tone: 'success',
           message: `Socio «${data.name}» guardado EN LA NUBE (${synced.memberCode}). Ya aparece automáticamente en la página de Coach Javi y en Recepción.`,
@@ -2186,6 +2285,8 @@ export default function App() {
             onTestNotification={handleTestNotification}
             onSendCoachRoutine={handleSendCoachRoutine}
             onCreateWalkInMember={handleCreateWalkInMember}
+            onRefreshLiveMembers={handleRefreshLiveMembers}
+            isRefreshingMembers={isRefreshingMembers}
             onPreviewRoutinesInMemberView={() => {
               setWorkspaceMode('socio');
               setActiveTab('entreno');
@@ -2237,6 +2338,8 @@ export default function App() {
             liveAccessLogs={liveAccessLogs}
             onToggleLiveMemberFee={handleToggleLiveMemberFee}
             onCreateWalkInMember={handleCreateWalkInMember}
+            onRefreshLiveMembers={handleRefreshLiveMembers}
+            isRefreshingMembers={isRefreshingMembers}
             onOpenTurnstileScanner={() => setWorkspaceMode('lector')}
           />
         ) : (

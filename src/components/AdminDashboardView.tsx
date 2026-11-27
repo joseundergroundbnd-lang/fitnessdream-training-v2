@@ -110,6 +110,8 @@ interface AdminDashboardViewProps {
     feeStatus: FeeStatus;
     assignedCoach: string;
   }) => Promise<{ savedToCloud: boolean; member: LiveGymMember }>;
+  onRefreshLiveMembers?: () => Promise<{ count: number; error?: string }>;
+  isRefreshingMembers?: boolean;
   onOpenTurnstileScanner: () => void;
 }
 
@@ -164,6 +166,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   liveAccessLogs,
   onToggleLiveMemberFee,
   onCreateWalkInMember,
+  onRefreshLiveMembers,
+  isRefreshingMembers = false,
   onOpenTurnstileScanner,
 }) => {
   const [subtab, setSubtab] = useState<
@@ -607,6 +611,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           liveAccessLogs={liveAccessLogs}
           onToggleMemberFee={onToggleLiveMemberFee}
           onCreateWalkInMember={onCreateWalkInMember}
+          onRefreshLiveMembers={onRefreshLiveMembers}
+          isRefreshingMembers={isRefreshingMembers}
           onOpenTurnstileScanner={onOpenTurnstileScanner}
           onOpenPresentationKit={onOpenPresentationKit}
         />
@@ -1416,6 +1422,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           onTestNotification={onTestNotification}
           onSendCoachRoutine={onSendCoachRoutine}
           onCreateWalkInMember={onCreateWalkInMember}
+          onRefreshLiveMembers={onRefreshLiveMembers}
+          isRefreshingMembers={isRefreshingMembers}
           onPreviewRoutinesInMemberView={onPreviewRoutinesInMemberView}
           onOpenPresentationKit={onOpenPresentationKit}
         />

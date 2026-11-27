@@ -15,6 +15,7 @@ import {
   PlayCircle,
   Plus,
   QrCode,
+  RefreshCw,
   ShieldAlert,
   ShieldCheck,
   Smartphone,
@@ -63,6 +64,8 @@ interface ReceptionLivePanelProps {
     feeStatus: FeeStatus;
     assignedCoach: string;
   }) => Promise<{ savedToCloud: boolean; member: LiveGymMember }>;
+  onRefreshLiveMembers?: () => Promise<{ count: number; error?: string }>;
+  isRefreshingMembers?: boolean;
   onOpenTurnstileScanner: () => void;
   onOpenPresentationKit?: (tab: PresentationKitTab) => void;
 }
@@ -121,6 +124,8 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
   liveAccessLogs,
   onToggleMemberFee,
   onCreateWalkInMember,
+  onRefreshLiveMembers,
+  isRefreshingMembers = false,
   onOpenTurnstileScanner,
   onOpenPresentationKit,
 }) => {
@@ -551,10 +556,37 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
                   reacciona al instante.
                 </p>
               </div>
-              <div className="flex items-center gap-3 text-xs font-mono tabular-nums">
+              <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono tabular-nums">
                 <span className="text-emerald-400 font-bold">{paidCount} al día</span>
                 <span className="text-slate-600">·</span>
                 <span className="text-red-400 font-bold">{overdueCount} pendientes</span>
+                {isLiveAdmin && onRefreshLiveMembers && (
+                  <button
+                    type="button"
+                    disabled={isRefreshingMembers}
+                    onClick={async () => {
+                      const res = await onRefreshLiveMembers();
+                      if (res.error) {
+                        setFormNotice({ tone: 'err', text: res.error });
+                      } else {
+                        setFormNotice({
+                          tone: 'ok',
+                          text: `Actualizado de la nube: ${res.count} ${
+                            res.count === 1 ? 'socio real sincronizado' : 'socios reales sincronizados'
+                          }.`,
+                        });
+                      }
+                    }}
+                    className="min-h-[34px] px-2.5 rounded-lg bg-[#131B28] hover:border-[#00A8FF] disabled:opacity-60 border border-white/15 text-slate-200 hover:text-white font-sans font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 text-[#33C1FF] ${
+                        isRefreshingMembers ? 'animate-spin' : ''
+                      }`}
+                    />
+                    <span>{isRefreshingMembers ? 'Actualizando...' : 'Actualizar de la nube'}</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -632,12 +664,12 @@ export const ReceptionLivePanel: React.FC<ReceptionLivePanelProps> = ({
               {formNotice && (
                 <p
                   role={formNotice.tone === 'err' ? 'alert' : 'status'}
-                  className={`text-xs font-medium ${
+                  className={`text-xs font-semibold rounded-lg px-3 py-2.5 border leading-relaxed ${
                     formNotice.tone === 'err'
-                      ? 'text-rose-300'
+                      ? 'bg-rose-950/55 border-rose-500/50 text-rose-100'
                       : formNotice.tone === 'ok'
-                        ? 'text-emerald-300'
-                        : 'text-amber-300'
+                        ? 'bg-emerald-950/50 border-emerald-500/45 text-emerald-100'
+                        : 'bg-amber-950/50 border-amber-500/45 text-amber-100'
                   }`}
                 >
                   {formNotice.text}

@@ -3,16 +3,19 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
+  getDocsFromServer,
   limit,
   onSnapshot,
-  orderBy,
   query,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
   writeBatch,
+  type QueryDocumentSnapshot,
+  type DocumentData,
   type Timestamp,
   type Unsubscribe,
 } from 'firebase/firestore';
@@ -156,33 +159,93 @@ export async function checkIsLiveAdmin(user: User): Promise<boolean> {
   }
 }
 
+function extractFirestoreErrorCode(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    return String((error as { code?: unknown }).code ?? '');
+  }
+  return '';
+}
+
+function formatFirestoreErrorMessage(error: unknown, contextLabel: string): string {
+  const code = extractFirestoreErrorCode(error);
+  const rawMsg = error instanceof Error ? error.message : String(error);
+  const lower = `${code} ${rawMsg}`.toLowerCase();
+
+  if (lower.includes('resource-exhausted') || lower.includes('quota')) {
+    return `Cuota diaria gratuita de Firebase alcanzada (${code || 'quota-exceeded'}). Se reinicia mañana o puedes ampliarla en Firebase Console.`;
+  }
+  if (lower.includes('permission')) {
+    return `Permiso denegado en la nube al ${contextLabel} (${code || 'permission-denied'}). Asegúrate de iniciar sesión con fitnessdreamsbenidorm@gmail.com o joseundergroundbnd@gmail.com.`;
+  }
+  if (lower.includes('unavailable') || lower.includes('offline') || lower.includes('network')) {
+    return `Sin conexión estable con Firebase al ${contextLabel} (${code || 'unavailable'}). Revisa Internet e inténtalo de nuevo.`;
+  }
+  return `Error en la nube al ${contextLabel}${code ? ` [${code}]` : ''}: ${rawMsg}`;
+}
+
+function mapMemberDocToLiveGymMember(
+  snap: QueryDocumentSnapshot<DocumentData>
+): { member: LiveGymMember; sortMs: number } {
+  const d = snap.data();
+  const updatedTs = d.updatedAt
+    ? formatTimestampLabel(d.updatedAt).ms
+    : d.createdAt
+      ? formatTimestampLabel(d.createdAt).ms
+      : 0;
+  const member: LiveGymMember = {
+    id: snap.id,
+    uid: String(d.uid ?? snap.id),
+    memberCode: String(d.memberCode ?? 'FD-0001'),
+    name: String(d.name ?? 'Socio'),
+    tier: d.tier === 'Socio Club' ? 'Socio Club' : 'Socio Fundador',
+    goal: String(d.goal ?? ''),
+    feeStatus: normalizeFeeStatus(d.feeStatus),
+    monthlyFee: Number(d.monthlyFee ?? 34.9),
+    streakDays: Number(d.streakDays ?? 0),
+    totalCheckIns: Number(d.totalCheckIns ?? 0),
+    lastCheckInLabel: String(d.lastCheckInLabel ?? ''),
+    daysSinceLastVisit: Number(d.daysSinceLastVisit ?? 0),
+    outreachStatus: (d.outreachStatus as LiveGymMember['outreachStatus']) ?? 'pendiente',
+    lastOutreachNote: typeof d.lastOutreachNote === 'string' ? d.lastOutreachNote : undefined,
+    assignedCoach: String(d.assignedCoach ?? 'Javi Busta'),
+    isRealMember: Boolean(d.isRealMember ?? true),
+  };
+  return { member, sortMs: updatedTs };
+}
+
 export function subscribeAuthorizedStaff(
   onData: (staff: AuthorizedStaffRecord[]) => void
 ): Unsubscribe {
   const path = 'authorizedStaff';
-  const q = query(collection(db, path), orderBy('updatedAt', 'desc'), limit(30));
+  const q = query(collection(db, path), limit(30));
   return onSnapshot(
     q,
     (snapshot) => {
-      const list: AuthorizedStaffRecord[] = snapshot.docs.map((snap) => {
-        const d = snap.data();
-        const role: AuthorizedStaffRole =
-          d.role === 'gym-main' || d.role === 'owner' || d.role === 'scanner'
-            ? d.role
-            : 'coach';
-        return {
-          staffId: snap.id,
-          email: String(d.email ?? ''),
-          label: String(d.label ?? 'Cuenta autorizada'),
-          role,
-          addedByUid: String(d.addedByUid ?? ''),
-          isCloudSynced: true,
-        };
-      });
+      const list: AuthorizedStaffRecord[] = snapshot.docs
+        .map((snap) => {
+          const d = snap.data();
+          const role: AuthorizedStaffRole =
+            d.role === 'gym-main' || d.role === 'owner' || d.role === 'scanner'
+              ? d.role
+              : 'coach';
+          return {
+            record: {
+              staffId: snap.id,
+              email: String(d.email ?? ''),
+              label: String(d.label ?? 'Cuenta autorizada'),
+              role,
+              addedByUid: String(d.addedByUid ?? ''),
+              isCloudSynced: true,
+            },
+            sortMs: d.updatedAt ? formatTimestampLabel(d.updatedAt).ms : 0,
+          };
+        })
+        .sort((a, b) => b.sortMs - a.sortMs)
+        .map((entry) => entry.record);
       onData(list);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      console.error('[FitnessDreams] Error suscripción authorizedStaff:', error);
     }
   );
 }
@@ -277,8 +340,9 @@ export async function upsertSignedInMemberProfile(
     if (!existingSnap.exists()) {
       const memberCode = generateMemberCodeFromUid(uid);
       const monthlyFee = cleanTier === 'Socio Fundador' ? 34.9 : 46.9;
-      const batch = writeBatch(db);
-      batch.set(memberRef, {
+
+      // 1. Write the main /members/{uid} document first so it can never be rolled back by PII subdoc writes
+      await setDoc(memberRef, {
         uid,
         memberCode,
         name: cleanName,
@@ -296,13 +360,18 @@ export async function upsertSignedInMemberProfile(
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-      batch.set(privateRef, {
-        uid,
-        email: cleanEmail,
-        phone: cleanPhone,
-        updatedAt: serverTimestamp(),
-      });
-      await batch.commit();
+
+      // 2. Write isolated PII contact subdocument (non-blocking if rules/network reject subdoc)
+      try {
+        await setDoc(privateRef, {
+          uid,
+          email: cleanEmail,
+          phone: cleanPhone,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (contactErr) {
+        console.warn('[FitnessDreams] Aviso guardando contacto privado de socio:', contactErr);
+      }
 
       return {
         id: uid,
@@ -326,24 +395,31 @@ export async function upsertSignedInMemberProfile(
     }
 
     // Update only Tier-2 allowed profile fields so member never touches feeStatus
-    const batch = writeBatch(db);
-    batch.update(memberRef, {
+    await updateDoc(memberRef, {
       name: cleanName,
       goal: cleanGoal,
       tier: cleanTier,
       updatedAt: serverTimestamp(),
     });
-    batch.set(
-      privateRef,
-      {
-        uid,
-        email: cleanEmail,
-        phone: cleanPhone,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-    await batch.commit();
+    try {
+      const existingPrivate = await getDoc(privateRef);
+      if (existingPrivate.exists()) {
+        await updateDoc(privateRef, {
+          email: cleanEmail,
+          phone: cleanPhone,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(privateRef, {
+          uid,
+          email: cleanEmail,
+          phone: cleanPhone,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch (contactErr) {
+      console.warn('[FitnessDreams] Aviso actualizando contacto privado:', contactErr);
+    }
 
     const data = existingSnap.data();
     return {
@@ -367,18 +443,13 @@ export async function upsertSignedInMemberProfile(
     };
   } catch (error) {
     console.error(`[FitnessDreams] Error guardando socio en ${memberPath}:`, error);
-    const rawMsg = error instanceof Error ? error.message : String(error);
-    if (rawMsg.toLowerCase().includes('permission')) {
-      throw new Error(
-        'Permiso denegado al guardar tu perfil en la nube. Vuelve a iniciar sesión con una cuenta de Google verificada e inténtalo de nuevo.'
-      );
-    }
-    throw new Error(`No se pudo guardar el socio en la nube (${rawMsg}). Revisa tu conexión e inténtalo de nuevo.`);
+    throw new Error(formatFirestoreErrorMessage(error, 'guardar tu perfil de socio'));
   }
 }
 
 /**
- * Reception PC quick-add for real pilot test clients (creates /members/{walkinId} + private/contact).
+ * Reception PC / Coach Portal quick-add for real clients (writes /members/{walkinId} directly first,
+ * verifies server persistence, then writes private/contact separately so nothing can roll back the member).
  */
 export async function createWalkInPilotMember(input: {
   name: string;
@@ -402,13 +473,13 @@ export async function createWalkInPilotMember(input: {
   const privateRef = doc(db, 'members', memberId, 'private', 'contact');
 
   try {
-    const batch = writeBatch(db);
-    batch.set(memberRef, {
+    // 1. Write the main member document directly (no writeBatch / existsAfter failure risk)
+    await setDoc(memberRef, {
       uid: memberId,
       memberCode,
       name: cleanName,
       tier: cleanTier,
-      goal: 'Prueba piloto en sala',
+      goal: 'Alta en recepción',
       feeStatus,
       monthlyFee,
       streakDays: 0,
@@ -421,13 +492,24 @@ export async function createWalkInPilotMember(input: {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
-    batch.set(privateRef, {
-      uid: memberId,
-      email: cleanEmail,
-      phone: cleanPhone,
-      updatedAt: serverTimestamp(),
-    });
-    await batch.commit();
+
+    // 2. Verify document actually persisted on Firestore servers
+    const verifiedSnap = await getDocFromServer(memberRef);
+    if (!verifiedSnap.exists()) {
+      throw new Error('La nube no confirmó el alta del socio. Revisa tu conexión e inténtalo de nuevo.');
+    }
+
+    // 3. Persist private contact details separately (never rolls back the member doc)
+    try {
+      await setDoc(privateRef, {
+        uid: memberId,
+        email: cleanEmail,
+        phone: cleanPhone,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (contactErr) {
+      console.warn('[FitnessDreams] Aviso guardando contacto privado del alta:', contactErr);
+    }
 
     return {
       id: memberId,
@@ -435,7 +517,7 @@ export async function createWalkInPilotMember(input: {
       memberCode,
       name: cleanName,
       tier: cleanTier,
-      goal: 'Prueba piloto en sala',
+      goal: 'Alta en recepción',
       feeStatus,
       monthlyFee,
       streakDays: 0,
@@ -450,13 +532,7 @@ export async function createWalkInPilotMember(input: {
     };
   } catch (error) {
     console.error(`[FitnessDreams] Error creando socio walk-in en members/${memberId}:`, error);
-    const rawMsg = error instanceof Error ? error.message : String(error);
-    if (rawMsg.toLowerCase().includes('permission')) {
-      throw new Error(
-        'Permiso denegado en la nube: conecta una cuenta de Google autorizada del gimnasio/coach para dar de alta socios en la nube.'
-      );
-    }
-    throw new Error(`No se pudo guardar el nuevo socio en la nube (${rawMsg}). Revisa tu conexión e inténtalo de nuevo.`);
+    throw new Error(formatFirestoreErrorMessage(error, 'guardar el nuevo socio'));
   }
 }
 
@@ -850,9 +926,26 @@ export function subscribeLiveMemberSelf(
       });
     },
     (error) => {
-      handleFirestoreError(error, OperationType.GET, path);
+      console.error(`[FitnessDreams] Error suscripción ${path}:`, error);
     }
   );
+}
+
+/**
+ * Direct server-first fetch of all /members documents (bypasses stalled WebChannel listeners or local cache).
+ */
+export async function fetchAllLiveMembersFromServer(): Promise<LiveGymMember[]> {
+  const q = query(collection(db, 'members'), limit(200));
+  try {
+    const snapshot = await getDocsFromServer(q);
+    return snapshot.docs
+      .map(mapMemberDocToLiveGymMember)
+      .sort((a, b) => b.sortMs - a.sortMs)
+      .map((entry) => entry.member);
+  } catch (error) {
+    console.error('[FitnessDreams] Error leyendo socios desde servidor:', error);
+    throw new Error(formatFirestoreErrorMessage(error, 'leer los socios de la nube'));
+  }
 }
 
 export function subscribeAllLiveMembers(
@@ -865,44 +958,14 @@ export function subscribeAllLiveMembers(
     q,
     (snapshot) => {
       const list = snapshot.docs
-        .map((snap) => {
-          const d = snap.data();
-          const updatedTs = d.updatedAt
-            ? formatTimestampLabel(d.updatedAt).ms
-            : d.createdAt
-              ? formatTimestampLabel(d.createdAt).ms
-              : 0;
-          const member: LiveGymMember = {
-            id: snap.id,
-            uid: String(d.uid ?? snap.id),
-            memberCode: String(d.memberCode ?? 'FD-0001'),
-            name: String(d.name ?? 'Socio'),
-            tier: d.tier === 'Socio Club' ? 'Socio Club' : 'Socio Fundador',
-            goal: String(d.goal ?? ''),
-            feeStatus: normalizeFeeStatus(d.feeStatus),
-            monthlyFee: Number(d.monthlyFee ?? 34.9),
-            streakDays: Number(d.streakDays ?? 0),
-            totalCheckIns: Number(d.totalCheckIns ?? 0),
-            lastCheckInLabel: String(d.lastCheckInLabel ?? ''),
-            daysSinceLastVisit: Number(d.daysSinceLastVisit ?? 0),
-            outreachStatus: (d.outreachStatus as LiveGymMember['outreachStatus']) ?? 'pendiente',
-            lastOutreachNote: typeof d.lastOutreachNote === 'string' ? d.lastOutreachNote : undefined,
-            assignedCoach: String(d.assignedCoach ?? 'Javi Busta'),
-            isRealMember: Boolean(d.isRealMember ?? true),
-          };
-          return { member, sortMs: updatedTs };
-        })
+        .map(mapMemberDocToLiveGymMember)
         .sort((a, b) => b.sortMs - a.sortMs)
         .map((entry) => entry.member);
       onData(list);
     },
     (error) => {
       console.error('[FitnessDreams] Error suscripción directorio de socios:', error);
-      onError?.(
-        error instanceof Error
-          ? error.message
-          : 'No se pudo sincronizar la base de datos de socios desde la nube.'
-      );
+      onError?.(formatFirestoreErrorMessage(error, 'sincronizar la lista de socios'));
     }
   );
 }
@@ -914,8 +977,8 @@ export function subscribeLiveAccessLogs(
 ): Unsubscribe {
   const path = 'accessLogs';
   const q = isAdminUser
-    ? query(collection(db, path), orderBy('createdAt', 'desc'), limit(40))
-    : query(collection(db, path), where('memberUid', '==', sanitizeId(uid)), limit(20));
+    ? query(collection(db, path), limit(60))
+    : query(collection(db, path), where('memberUid', '==', sanitizeId(uid)), limit(25));
 
   return onSnapshot(
     q,
@@ -939,11 +1002,12 @@ export function subscribeLiveAccessLogs(
             createdAtMs: ts.ms,
           };
         })
-        .sort((a, b) => b.createdAtMs - a.createdAtMs);
+        .sort((a, b) => b.createdAtMs - a.createdAtMs)
+        .slice(0, 40);
       onData(list);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      console.error('[FitnessDreams] Error suscripción accessLogs:', error);
     }
   );
 }
@@ -955,48 +1019,55 @@ export function subscribeLiveRoutines(
 ): Unsubscribe {
   const path = 'coachRoutines';
   const q = isAdminUser
-    ? query(collection(db, path), orderBy('createdAt', 'desc'), limit(25))
-    : query(collection(db, path), where('targetMemberId', 'in', ['all', sanitizeId(uid)]), limit(25));
+    ? query(collection(db, path), limit(50))
+    : query(collection(db, path), where('targetMemberId', 'in', ['all', sanitizeId(uid)]), limit(35));
 
   return onSnapshot(
     q,
     (snapshot) => {
-      const list: LiveCoachRoutineDoc[] = snapshot.docs.map((snap) => {
-        const d = snap.data();
-        const ts = formatTimestampLabel(d.createdAt);
-        const freq: LiveCoachRoutineDoc['frequency'] =
-          d.frequency === 'Semanal' || d.frequency === 'Mensual' || d.frequency === 'Trimestral'
-            ? d.frequency
-            : 'Diaria';
-        return {
-          id: snap.id,
-          targetMemberId: String(d.targetMemberId ?? 'all'),
-          targetMemberName: typeof d.targetMemberName === 'string' ? d.targetMemberName : undefined,
-          targetMemberCode: typeof d.targetMemberCode === 'string' ? d.targetMemberCode : undefined,
-          title: String(d.title ?? 'Rutina Coach'),
-          frequency: freq,
-          dayLabel: String(d.dayLabel ?? 'En directo'),
-          coachId: String(d.coachId ?? 'coach-javi'),
-          coachName: String(d.coachName ?? 'Javi Busta'),
-          coachRole: String(d.coachRole ?? 'Coach'),
-          goal: String(d.goal ?? ''),
-          coachMessage: String(d.coachMessage ?? ''),
-          machineCodes: Array.isArray(d.machineCodes) ? d.machineCodes.map(String) : [],
-          exercises: Array.isArray(d.exercises)
-            ? (d.exercises as import('../types/gym').CoachRoutineExercise[])
-            : undefined,
-          cardioBlock:
-            d.cardioBlock && typeof d.cardioBlock === 'object'
-              ? (d.cardioBlock as import('../types/gym').CoachRoutineCardioBlock)
-              : undefined,
-          createdByUid: String(d.createdByUid ?? ''),
-          createdAtLabel: ts.label,
-        };
-      });
+      const list: LiveCoachRoutineDoc[] = snapshot.docs
+        .map((snap) => {
+          const d = snap.data();
+          const ts = formatTimestampLabel(d.createdAt);
+          const freq: LiveCoachRoutineDoc['frequency'] =
+            d.frequency === 'Semanal' || d.frequency === 'Mensual' || d.frequency === 'Trimestral'
+              ? d.frequency
+              : 'Diaria';
+          return {
+            routine: {
+              id: snap.id,
+              targetMemberId: String(d.targetMemberId ?? 'all'),
+              targetMemberName: typeof d.targetMemberName === 'string' ? d.targetMemberName : undefined,
+              targetMemberCode: typeof d.targetMemberCode === 'string' ? d.targetMemberCode : undefined,
+              title: String(d.title ?? 'Rutina Coach'),
+              frequency: freq,
+              dayLabel: String(d.dayLabel ?? 'En directo'),
+              coachId: String(d.coachId ?? 'coach-javi'),
+              coachName: String(d.coachName ?? 'Javi Busta'),
+              coachRole: String(d.coachRole ?? 'Coach'),
+              goal: String(d.goal ?? ''),
+              coachMessage: String(d.coachMessage ?? ''),
+              machineCodes: Array.isArray(d.machineCodes) ? d.machineCodes.map(String) : [],
+              exercises: Array.isArray(d.exercises)
+                ? (d.exercises as import('../types/gym').CoachRoutineExercise[])
+                : undefined,
+              cardioBlock:
+                d.cardioBlock && typeof d.cardioBlock === 'object'
+                  ? (d.cardioBlock as import('../types/gym').CoachRoutineCardioBlock)
+                  : undefined,
+              createdByUid: String(d.createdByUid ?? ''),
+              createdAtLabel: ts.label,
+            },
+            sortMs: ts.ms,
+          };
+        })
+        .sort((a, b) => b.sortMs - a.sortMs)
+        .map((entry) => entry.routine)
+        .slice(0, 25);
       onData(list);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      console.error('[FitnessDreams] Error suscripción coachRoutines:', error);
     }
   );
 }
@@ -1009,7 +1080,7 @@ export function subscribeLiveMessages(
 ): Unsubscribe {
   const path = 'directMessages';
   const q = isAdminUser
-    ? query(collection(db, path), orderBy('createdAt', 'desc'), limit(100))
+    ? query(collection(db, path), limit(150))
     : query(collection(db, path), where('memberId', '==', sanitizeId(uid)), limit(100));
 
   return onSnapshot(
@@ -1040,9 +1111,7 @@ export function subscribeLiveMessages(
     },
     (error) => {
       console.error('[FitnessDreams] Error suscripción mensajes:', error);
-      onError?.(
-        error instanceof Error ? error.message : 'No se pudieron sincronizar los mensajes en directo.'
-      );
+      onError?.(formatFirestoreErrorMessage(error, 'sincronizar los mensajes'));
     }
   );
 }

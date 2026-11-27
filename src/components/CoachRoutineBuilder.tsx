@@ -16,6 +16,7 @@ import {
   MessageCircle,
   PlayCircle,
   Plus,
+  RefreshCw,
   Search,
   Send,
   Trash2,
@@ -96,6 +97,8 @@ interface CoachRoutineBuilderProps {
     feeStatus: FeeStatus;
     assignedCoach: string;
   }) => Promise<{ savedToCloud: boolean; member: LiveGymMember }>;
+  onRefreshLiveMembers?: () => Promise<{ count: number; error?: string }>;
+  isRefreshingMembers?: boolean;
   onPreviewRoutinesInMemberView: () => void;
   onOpenPresentationKit: (tab: PresentationKitTab) => void;
   isStandaloneCoachPortal?: boolean;
@@ -139,6 +142,8 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
   onTestNotification,
   onSendCoachRoutine,
   onCreateWalkInMember,
+  onRefreshLiveMembers,
+  isRefreshingMembers = false,
   onPreviewRoutinesInMemberView,
   onOpenPresentationKit,
   isStandaloneCoachPortal = false,
@@ -1033,6 +1038,33 @@ export const CoachRoutineBuilder: React.FC<CoachRoutineBuilderProps> = ({
                   {realMembersCount > 0 ? `${realMembersCount} reales/alta · ` : ''}
                   {filteredDirectoryMembers.length} de {allDirectoryMembers.length} socios
                 </span>
+                {isLiveAdmin && onRefreshLiveMembers && (
+                  <button
+                    type="button"
+                    disabled={isRefreshingMembers}
+                    onClick={async () => {
+                      const res = await onRefreshLiveMembers();
+                      if (res.error) {
+                        setQuickMemberNotice({ tone: 'err', text: res.error });
+                      } else {
+                        setQuickMemberNotice({
+                          tone: 'ok',
+                          text: `Actualizado desde la nube: ${res.count} ${
+                            res.count === 1 ? 'socio real encontrado' : 'socios reales encontrados'
+                          }.`,
+                        });
+                      }
+                    }}
+                    className="min-h-[36px] px-2.5 rounded-lg bg-[#06080D] hover:border-[#00A8FF] disabled:opacity-60 border border-white/15 text-slate-200 hover:text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 text-[#33C1FF] ${
+                        isRefreshingMembers ? 'animate-spin' : ''
+                      }`}
+                    />
+                    <span>{isRefreshingMembers ? 'Actualizando...' : 'Actualizar nube'}</span>
+                  </button>
+                )}
                 {onCreateWalkInMember && (
                   <button
                     type="button"

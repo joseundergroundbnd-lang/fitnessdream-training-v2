@@ -417,7 +417,10 @@ service cloud.firestore {
           && isVerified()
           && isValidMemberPrivateContact(incoming())
           && incoming().updatedAt == request.time
-          && existsAfter(/databases/$(database)/documents/members/$(memberId))
+          && (
+            exists(/databases/$(database)/documents/members/$(memberId))
+            || existsAfter(/databases/$(database)/documents/members/$(memberId))
+          )
           && (isAdmin() || (isOwner(memberId) && incoming().uid == request.auth.uid));
         allow update: if isValidId(memberId)
           && isValidId(docId)
